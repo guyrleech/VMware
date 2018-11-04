@@ -873,7 +873,8 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
 
     Write-Verbose "Creating VM # $vmNumber : $thisChosenName"
 
-    $cloneVM = New-VM -Name $thisChosenName -MemoryMB $chosenMemory -NumCpu $chosenCPUs -CoresPerSocket $chosenCores -Datastore $chosenDatastore -DiskMB 1 -DiskStorageFormat Thin -GuestId $chosenTemplate.ExtensionData.Config.GuestId -Notes $notes
+    $cloneVM = New-VM -Name $thisChosenName -MemoryMB $chosenMemory -NumCpu $chosenCPUs -CoresPerSocket $chosenCores -Datastore $chosenDatastore -DiskMB 1 -DiskStorageFormat Thin `
+        -GuestId $chosenTemplate.ExtensionData.Config.GuestId -Notes $notes -HardwareVersion $chosenTemplate.HardwareVersion
 
     if( ! $cloneVM )
     {
@@ -1181,5 +1182,5 @@ if( $disconnect )
 
 if( $waitToExit )
 {
-    $null = Read-Host 'Hit <enter> to exit"='
+    $null = Read-Host 'Hit <enter> to exit'
 }
