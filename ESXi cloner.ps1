@@ -4,6 +4,13 @@
     @guyrleech 2018
 
     Modification History:
+
+    04/11/18  GRL   Added -linkedClone, -username, -password and -waitToExit parameters
+                    Added extra verifications on VM name in GUI
+                    Made GUI window normal if start minimised
+                    Hooked -datastore parameter into the GUI
+                    Changed creation of some devices to use enumeration of existing devices
+                    Fixed path bug for copied disks
 #>
 
 <#
@@ -40,6 +47,10 @@ The name of the snapshot to use when creating a linked clone. Specifying this au
 
 Do not show the user interface and go straight to cloning the VM using the supplied command line parameters
 
+.PARAMETER linkedClone
+
+Ticks the box in the GUI to enable linked clones
+
 .PARAMETER count
 
 The number of clones to create
@@ -72,6 +83,10 @@ Override the number of cores per CPU defined in the template with the number spe
 
 Override the allocated memory defined in the template with the number specified here in MB
 
+.PARAMETER waitToExit
+
+Requires the <enter> key to be pressed before the script exits
+
 .PARAMETER maxVmdkDescriptorSize
 
 If the vmdk file exceeds this size then the script will not attempt to edt it because it is probably a binary file and not a text descriptor
@@ -97,6 +112,8 @@ snapshot if the "Server 2016 Sysprep" VM called "Linked Clone". Power each one o
 
 Credentials for ESXi can be stored by running "Connect-VIServer -Server <esxi> -User <username> -Password <password> -SaveCredentials
 
+Username and password can also be specified via %esxiusername% and %esxipassword% environment variables respectively
+
 #>
 
 [CmdletBinding()]
@@ -114,10 +131,14 @@ Param
     [switch]$powerOn ,
     [switch]$noConnect ,
     [switch]$disconnect ,
+    [switch]$linkedClone ,
+    [string]$username ,
+    [string]$password ,
     ## Parameters to override what comes from template
     [int]$numCpus ,
     [int]$numCores ,
     [int]$MB ,
+    [switch]$waitToExit ,
     ## it is advised not to use the following parameters
     [int]$maxVmdkDescriptorSize = 10KB ,
     [string]$configRegKey = 'HKCU:\Software\Guy Leech\ESXi Cloner' 
@@ -149,9 +170,28 @@ Function Get-Templates
     $templates | ForEach-Object { $WPFcomboTemplate.items.add( $_ ) }
 }
 
-Function Connect-Hypervisor( $GUIobject , $servers , [bool]$pregui, [ref]$vServer )
+Function Connect-Hypervisor( $GUIobject , $servers , [bool]$pregui, [ref]$vServer , [string]$username , [string]$password )
 {
-    $vServer.Value = Connect-VIServer -Server $servers -ErrorAction Continue
+    [hashtable]$connectParams = @{}
+
+    if( ! [string]::IsNullOrEmpty( $username ) )
+    {
+        $connectParams.Add( 'User' , $username )
+    }
+    elseif( ! [string]::IsNullOrEmpty( $env:esxiusername ) )
+    {
+        $connectParams.Add( 'User' , $env:esxiusername )
+    }
+    if( ! [string]::IsNullOrEmpty( $password ) )
+    {
+        $connectParams.Add( 'Password' , $password )
+    }
+    elseif( ! [string]::IsNullOrEmpty( $env:esxipassword ) )
+    {
+        $connectParams.Add( 'Password' , $env:esxipassword )
+    }
+
+    $vServer.Value = Connect-VIServer -Server $servers -ErrorAction Continue @connectParams
 
     if( ! $vServer.Value )
     {
@@ -168,6 +208,10 @@ Function Connect-Hypervisor( $GUIobject , $servers , [bool]$pregui, [ref]$vServe
         if( $WPFcomboDatastore.items.Count -eq 1 )
         {
             $WPFcomboDatastore.SelectedIndex = 0
+        }
+        elseif( ! [string]::IsNullOrEmpty( $dataStore ) )
+        {
+            $WPFcomboDatastore.SelectedValue = $dataStore
         }
     }
 }
@@ -235,9 +279,14 @@ Function Validate-Fields( $guiobject )
         $null = Display-MessageBox -window $guiobject -text 'Must specify %d replacement pattern in the VM name when creating more than one clone' -caption 'Unable to Clone' -buttons OK -icon Error
         return $false
     }
-    if( $result -eq 1 -and $WPFtxtVMName.Text -match '%d' )
+    if( $result -eq 1 -and $WPFtxtVMName.Text -match '%' )
     {
         $null = Display-MessageBox -window $guiobject -text 'Illegal character ''%'' in VM name - did you mean to make more than one clone ?' -caption 'Unable to Clone' -buttons OK -icon Error
+        return $false
+    }
+    if( $WPFtxtVMName.Text -match '[\$\*\\/]' )
+    {
+        $null = Display-MessageBox -window $guiobject -text 'Illegal character(s) in VM name' -caption 'Unable to Clone' -buttons OK -icon Error
         return $false
     }
     if( ! [int]::TryParse( $WPFtxtMemory.Text , [ref]$result ) -or ! $result )
@@ -410,18 +459,18 @@ Function New-ClonedDisk
     (
         $cloneVM ,
         $sourceDisk ,
-        $destinationDatastore ,
+        [string]$destinationDatastore ,
         [string]$parent ,
         [int]$diskCount
     )
     [string]$baseDiskName = [io.path]::GetFileNameWithoutExtension( ( Split-Path $sourceDisk.FileName -Leaf ) )
-    Write-Verbose "Cloning `"$baseDiskName`" , format $($sourceDisk.StorageFormat) to [$($destinationDatastore.Name)] $($cloneVM.Name)"
+    Write-Verbose "Cloning `"$baseDiskName`" , format $($sourceDisk.StorageFormat) to [$destinationDatastore] $($cloneVM.Name)"
     [hashtable]$copyParams = @{}
     if( $sourceDisk.PSObject.properties[ 'DestinationStorageFormat' ] )
     {
         $copyParams.Add( 'DestinationStorageFormat' , $sourceDisk.StorageFormat )
     }
-    $clonedDisk = $sourceDisk | Copy-HardDisk -DestinationPath "[$($destinationDatastore.Name)] $($cloneVM.Name)" @copyParams
+    $clonedDisk = $sourceDisk | Copy-HardDisk -DestinationPath "[$destinationDatastore] $($cloneVM.Name)" @copyParams
     if( $clonedDisk )
     {
         [string]$diskToAdd = $null
@@ -504,8 +553,11 @@ Function New-ClonedDisk
 }
 #endregion Functions
 
-Remove-Module -Name Hyper-V -ErrorAction SilentlyContinue ## lest it clashes
+Remove-Module -Name Hyper-V -ErrorAction SilentlyContinue ## lest it clashes as there is some overlap in cmdlet names
+[string]$oldVerbosity = $VerbosePreference
+$VerbosePreference = 'SilentlyContinue'
 Import-Module -Name VMware.PowerCLI -ErrorAction Stop
+$VerbosePreference = $oldVerbosity
 
 if( Test-Path -Path $configRegKey -PathType Container -ErrorAction SilentlyContinue )
 {
@@ -523,7 +575,7 @@ $vServer = $null
 
 if( ! $noConnect -and ! [string]::IsNullOrEmpty( $esxihost ) )
 {
-    Connect-Hypervisor -GUIobject $null -servers $esxihost -pregui $true -vServer ([ref]$vServer)
+    Connect-Hypervisor -GUIobject $null -servers $esxihost -pregui $true -vServer ([ref]$vServer) -username $username -password $password
 }
 
 #region XAML&Modules
@@ -661,7 +713,7 @@ if( ! $noGui )
         }
         else
         {
-            Connect-Hypervisor -GUIobject $mainForm -servers $wpftxtESXiHost.Text -pregui $false -vServer ([ref]$vServer)
+            Connect-Hypervisor -GUIobject $mainForm -servers $wpftxtESXiHost.Text -pregui $false -vServer ([ref]$vServer) -username $username -password $password
         }
     })
     $WPFbtnFetch.Add_Click({
@@ -704,6 +756,8 @@ if( ! $noGui )
         $_.Handled = $true
         $WPFcomboSnapshot.IsEnabled = $false
     })
+    $WPFchkLinkedClone.IsChecked = $linkedClone
+    $WPFchkStart.IsChecked = $powerOn
     $WPFtxtESXiHost.Text = $esxihost
     $WPFtxtVMName.Text = $vmName
     $WPFtxtTemplate.Text = $templateName
@@ -717,9 +771,21 @@ if( ! $noGui )
         {
             $WPFcomboDatastore.SelectedIndex = 0
         }
+        elseif( ! [string]::IsNullOrEmpty( $dataStore ) )
+        {
+            $WPFcomboDatastore.SelectedValue = $dataStore
+        }
         $WPFbtnConnect.Content = 'Connected'
     }
     $WPFcomboSnapshot.IsEnabled = $false
+
+    $mainForm.add_Loaded({
+        if( $_.Source.WindowState -eq 'Minimized' )
+        {
+            $_.Source.WindowState = 'Normal'
+        }
+        $_.Handled = $true
+    })
 
     $result = $mainForm.ShowDialog()
     
@@ -784,6 +850,10 @@ else
     $chosenTemplate = $templates[0]
     $chosenDatastore = if( $PSBoundParameters[ 'DataStore' ] ) { $dataStores | Where-Object { $_.Name -match $dataStore } } else { $dataStores[0] }
     $chosenName = $vmName
+    if( [string]::IsNullOrEmpty( $vmName ) )
+    {
+        Throw 'Must specify a name for the clonedVM via -vmName'
+    }
     $chosenMemory = if( $PSBoundParameters[ 'MB' ] ) { $MB } else { $chosenTemplate.MemoryMB }
     $chosenCPUs = if( $PSBoundParameters['NumCPUs'] ) { $numCpus } else { $chosenTemplate.NumCPU }
     $chosenCores = if( $PSBoundParameters['NumCores'] ) { $numCores} else { $chosenTemplate.CoresPerSocket }
@@ -810,44 +880,90 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
         Throw "Failed to clone new VM `"$thisChosenName`""
     }
 
-    $thisChosenName = $cloneVM.Name
-
     ## Remove the auto added hard disk and NICs as we'll add from template
     $cloneVM | Get-HardDisk | Remove-HardDisk -DeletePermanently -Confirm:$false
     $cloneVM | Get-NetworkAdapter | Remove-NetworkAdapter -Confirm:$false
+    
+    ## if EFI then set it
+    $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+    $spec.Firmware = $chosenTemplate.ExtensionData.Config.Firmware
+    $spec.BootOptions = $chosenTemplate.ExtensionData.Config.BootOptions
+    $cloneVM.ExtensionData.ReconfigVM( $spec )
 
-    ## if video memory has been changed, e.g. for full HD screen resolution, then change the clone to match
-    $sourceVideoSettings = $chosenTemplate.ExtensionData.Config.Hardware.Device | Where-Object { $_.GetType().Name -eq 'VirtualMachineVideoCard' }
-    if( $sourceVideoSettings )
+    [array]$snapshots = if( ! [string]::IsNullOrEmpty( $snapshot ) )
     {
-        $destinationVideoSettings = $cloneVM.ExtensionData.Config.Hardware.Device | Where-Object { $_.GetType().Name -eq 'VirtualMachineVideoCard' }
-        if( $destinationVideoSettings )
-        {
-            if( $sourceVideoSettings.VideoRamSizeInKB -ne $destinationVideoSettings.VideoRamSizeInKB `
-                -or $sourceVideoSettings.NumDisplays -ne $destinationVideoSettings.NumDisplays `
-                -or $sourceVideoSettings.GraphicsMemorySizeInKB -ne $destinationVideoSettings.GraphicsMemorySizeInKB `
-                -or $sourceVideoSettings.Use3dRenderer -ne $destinationVideoSettings.Use3dRenderer `
-                -or $sourceVideoSettings.UseAutoDetect -ne $destinationVideoSettings.UseAutoDetect )
-            {
-                ## https://code.vmware.com/forums/2530/vsphere-powercli#580657
-                $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
-                $deviceChange = New-Object VMware.Vim.VirtualDeviceConfigSpec
-                $deviceChange.Operation = 'edit'
-                $deviceChange.Device += $sourceVideoSettings
-                $spec.DeviceChange += $deviceChange
-                $cloneVM.ExtensionData.ReconfigVM($spec)
-            }
-        }
-        else
-        {
-            Write-Warning 'Failed to get video settings for cloned VM'
-        }
+        @( Get-Snapshot -VM $chosenTemplate -Name $snapshot )
     }
     else
     {
-        Write-Warning 'Failed to get video settings for source VM'
+        $null
     }
 
+    $sourceView = $chosenTemplate | Get-View
+    $destinationView = $cloneVM | Get-View
+    [int]$busNumber = 0
+    [int]$key = 1
+    [hashtable]$scsiControllers = @{}
+
+    $sourceView.Config.Hardware.Device | ForEach-Object `
+    {
+        $existingDevice = $_
+        $newDevice = $null
+        $spec = $null
+        Write-Verbose "Examining device of type $($_.GetType().Name) base type $($_.GetType().BaseType)"
+        if( $_ -is [VMware.Vim.ParaVirtualSCSIController] -or $_ -is [VMware.Vim.VirtualLsiLogicSASController] -or $_ -is [VMware.Vim.VirtualLsiLogicController] )
+        {    
+            $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+            $NewSCSIDevice = New-Object VMware.Vim.VirtualDeviceConfigSpec
+            $NewSCSIDevice.operation = 'add'
+            $NewSCSIDevice.Device = $existingDevice
+            $spec.deviceChange += $NewSCSIDevice
+            [array]$deviceBefore = @( $destinationView.Config.Hardware.Device | Select -ExpandProperty Key )
+            $destinationView.ReconfigVM($spec)
+            $destinationView.UpdateViewData()
+            [array]$devicesAfter = @( $destinationView.Config.Hardware.Device )
+            [int]$controllersBefore = $scsiControllers.Count
+            $devicesAfter | Where-Object { $_.Key -notin $deviceBefore } | ForEach-Object `
+            {
+                ## So we can map disks to the correct controller
+                $scsiControllers.Add( $existingDevice.Key , $_.Key )
+            }
+            if( $scsiControllers.Count -eq $controllersBefore )
+            {
+                Write-Warning "Failed to find newly added $($existingcontroller.GetType().Name) SCSI controller so disks may not be attached or attached incorrectly"
+            }
+            $spec = $null
+        }
+        elseif( $_ -is [VMware.Vim.VirtualMachineVideoCard] )
+        {
+            $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+            $newDevice = New-Object VMware.Vim.VirtualDeviceConfigSpec
+            $newDevice.operation = 'edit'
+            $newDevice.Device = $existingDevice
+            $spec.deviceChange += $newDevice
+        }
+        elseif( $_ -is [VMware.Vim.VirtualUSBXHCIController] -or $_ -is [VMware.Vim.VirtualE1000e] -or $_ -is [VMware.Vim.VirtualVmxnet3]  -or $_ -is [VMware.Vim.VirtualFloppy] `
+            -or $_ -is [VMware.Vim.VirtualUSBController] -or $_ -is [VMware.Vim.VirtualHdAudioCard]-or $_ -is [VMware.Vim.VirtualParallelPort]-or $_ -is [VMware.Vim.VirtualSerialPort] )
+        {
+            $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+            $newDevice = New-Object VMware.Vim.VirtualDeviceConfigSpec
+            $newDevice.operation = 'add'
+            $newDevice.Device = $existingDevice
+            $spec.deviceChange += $newDevice
+        }
+        ## else should be in new VM already
+        if( $spec )
+        {            
+            $destinationView.ReconfigVM($spec)
+            if( ! $? )
+            {
+                Write-Warning "Error on $(newDevice.Operation)ing device of type $($existingDevice.GetType().Name)"
+            }
+            $destinationView.UpdateViewData()
+        }
+    }
+
+    ## can't add CDROM in above loop as may not have required controller   
     Get-CDDrive -VM $chosenTemplate | ForEach-Object `
     {
         [hashtable]$cdparams = @{
@@ -868,87 +984,9 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
         $newcd = New-CDDrive @cdparams
     }
 
-    Get-FloppyDrive -VM $chosenTemplate | ForEach-Object `
-    {
-        [hashtable]$floppyparams = @{
-            'VM' = $cloneVM
-            'StartConnected' = $_.ConnectionState.StartConnected
-        }
-        if( $_.HostDevice )
-        {
-            $floppyparams.Add(  'HostDevice' , $_.HostDevice )
-        }
-        if( $_.RemoteDevice )
-        {
-            $floppyparams += @{
-                'FloppyImagePath' = $_.FloppyImagePath
-                'RemoteDevice' = $_.RemoteDevice
-            }
-        }
-        $newfloppy = New-FloppyDrive @floppyparams
-    }
-
-    ## if EFI then set it
-    ## https://github.com/vmware/PowerCLI-Example-Scripts/blob/master/Scripts/SecureBoot.ps1
-    $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
-    $spec.Firmware = $chosenTemplate.ExtensionData.Config.Firmware
-    $bootOptions = New-Object VMware.Vim.VirtualMachineBootOptions
-    $bootOptions.EfiSecureBootEnabled = $chosenTemplate.ExtensionData.Config.BootOptions.EfiSecureBootEnabled
-    $bootOptions.BootDelay = $chosenTemplate.ExtensionData.Config.BootOptions.BootDelay
-    $bootOptions.BootOrder = $chosenTemplate.ExtensionData.Config.BootOptions.BootOrder
-    $bootOptions.BootRetryDelay = $chosenTemplate.ExtensionData.Config.BootOptions.BootRetryDelay
-    $bootOptions.BootRetryEnabled = $chosenTemplate.ExtensionData.Config.BootOptions.BootRetryEnabled
-    $bootOptions.EnterBIOSSetup = $false
-    $bootOptions.NetworkBootProtocol = $chosenTemplate.ExtensionData.Config.BootOptions.NetworkBootProtocol
-    $spec.BootOptions = $bootOptions
-    $cloneVM.ExtensionData.ReconfigVM( $spec )
-
-    [array]$snapshots = @( Get-Snapshot -VM $chosenTemplate | Where-Object { $_.Name -match $snapshot } )
-
-    $view = $chosenTemplate | Get-View
-    $newView = $cloneVM | Get-View
-    [int]$busNumber = 0
-    [int]$key = 1
-    [hashtable]$scsiControllers = @{}
-    $Controllers = $view.Config.Hardware.Device | Where-Object {$_ -is [VMware.Vim.ParaVirtualSCSIController] -or $_ -is [VMware.Vim.VirtualLsiLogicSASController] -or $_ -is [VMware.Vim.VirtualLsiLogicController]} | ForEach-Object `
-    {
-        $existingController = $_
-
-        $storagespec = New-Object VMware.Vim.VirtualMachineConfigSpec
-        $NewSCSIDevice = New-Object VMware.Vim.VirtualDeviceConfigSpec
-        $NewSCSIDevice.operation = 'add'
-        $NewSCSIDevice.device = New-Object -TypeName "VMware.Vim.$($existingcontroller.GetType().Name)"
-        $NewSCSIDevice.device.key = $key++
-        $NewSCSIDevice.device.busNumber = $BusNumber++
-        $NewSCSIDevice.device.sharedBus = $existingController.SharedBus
-        $storageSpec.deviceChange += $NewSCSIDevice
-        [array]$deviceBefore = @( $newView.Config.Hardware.Device | Select -ExpandProperty Key )
-        $newView.ReconfigVM($storageSpec)
-        $newView.UpdateViewData()
-        [array]$devicesAfter = @( $newView.Config.Hardware.Device )
-        [int]$controllersBefore = $scsiControllers.Count
-        $devicesAfter | Where-Object { $_.Key -notin $deviceBefore } | ForEach-Object `
-        {
-            ## So we can map disks to the correct controller
-            $scsiControllers.Add( $existingController.Key , $_.Key )
-        }
-        if( $scsiControllers.Count -eq $controllersBefore )
-        {
-            Write-Warning "Failed to find newly added $($existingcontroller.GetType().Name) SCSI controller so disks may not be attached or attached incorrectly"
-        }
-    }
-
-    Get-NetworkAdapter -VM $chosenTemplate | ForEach-Object `
-    {   
-        $newNIC = New-NetworkAdapter -NetworkName $_.NetworkName -Type $_.Type -WakeOnLan:$_.WakeOnLanEnabled -VM $cloneVM -StartConnected:$_.ConnectionState.StartConnected
-        if( ! $newNIC )
-        {
-            Write-Warning "Failed to create NIC for `"$($_.NetworkName)`""
-        }
-    }
-
     ## Update VM now we have changed its hardware
     $cloneVM = Get-VM -Id $cloneVM.Id
+    $destinationView.UpdateViewData()
 
     if( ! $sourceDisks -or ! $sourceDisks.Count )
     {
@@ -956,16 +994,25 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
     }
     else
     {
+        [string]$destinationDatastore = $null
+        [string]$destinationFolder = $null
         ## Check chosen datastore has enough free space for the copies
         $totalDiskSize = $sourceDisks | Measure-Object -Property CapacityGB -Sum | Select -ExpandProperty Sum
         if( $totalDiskSize -gt $chosenDatastore.FreeSpaceGB )
         {
             Write-Warning "Disks require $($totalDiskSize)GB but datastore $($chosenDatastore.Name) only has $($chosenDatastore.FreeSpaceGB)GB free space"
         }
-        $destinationDatastore = $cloneVM | Get-Datastore
-        $destinationDatacentre = $cloneVM | Get-Datacenter
-        $destinationFolder = "vmstore:\$destinationDatacentre\$destinationDatastore\$thisChosenName"
-        if( ! ( Test-Path -Path $destinationFolder ) )
+        [string]$destinationDatacentre = $cloneVM | Get-Datacenter
+        if( (Split-Path -Path $cloneVM.ExtensionData.Config.Files.VmPathName -Parent ) -match '^\[(.*)\]\s*(.*)$'  )
+        {
+            $destinationDatastore = $Matches[1]
+            $destinationFolder = Join-Path ( Join-Path "vmstore:\$destinationDatacentre" $destinationDatastore ) ($Matches[2] -replace '\\' , '/')
+        }
+        else
+        {
+            Throw "Unexpected format of VM path name `"$($cloneVM.ExtensionData.Config.Files.VmPathName)`""
+        }
+        if( ! ( Test-Path -Path $destinationFolder -PathType Container ) )
         {
             Throw "Path $destinationFolder does not exist"
         }
@@ -1080,7 +1127,7 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
                     ## Need to find the base disk so we can find what SCSI controller it is attached to
                     [string]$baseSourceDiskName = (($sourceDisk.FileName -replace '-\d{6}\.vmdk$' , '') -split '/')[-1]
                     $theSourceDisk = $sourceDisks | Where-Object { $_.FileName -match "$($baseSourceDiskName)\.vmdk" -or $_.FileName -match "$($baseSourceDiskName)-\d{6}\.vmdk" }
-                    [string]$destinationDisk = ( "[{0}] {1}/{2}" -f $destinationDatastore , $thisChosenName , $newDiskName )
+                    [string]$destinationDisk = "{0}/{1}" -f (Split-Path -Path $cloneVM.ExtensionData.Config.Files.VmPathName -Parent) , $newDiskName
                     ## Add disk to VM
                     $result = Add-NewDisk -VM $cloneVM -sourceDisk $theSourceDisk -newDisk $destinationDisk
                     if( ! $result )
@@ -1130,4 +1177,9 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
 if( $disconnect )
 {
     $vServer|Disconnect-VIServer -Confirm:$false
+}
+
+if( $waitToExit )
+{
+    $null = Read-Host 'Hit <enter> to exit"='
 }
