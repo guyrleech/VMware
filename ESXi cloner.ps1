@@ -612,6 +612,7 @@ if( ! $noConnect -and ! [string]::IsNullOrEmpty( $esxihost ) )
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="200*"></ColumnDefinition>
                 <ColumnDefinition Width="250*"></ColumnDefinition>
+                <ColumnDefinition Width="90*"></ColumnDefinition>
                 <ColumnDefinition Width="150*"></ColumnDefinition>
             </Grid.ColumnDefinitions>
 
@@ -631,7 +632,7 @@ if( ! $noConnect -and ! [string]::IsNullOrEmpty( $esxihost ) )
             <TextBlock Grid.Row="13" Grid.Column="0" Text=""></TextBlock>
 
             <TextBox x:Name="txtESXiHost" Grid.Row="0" Grid.Column="1"></TextBox>
-            <Button x:Name="btnConnect" Grid.Row="0"  Grid.Column="2" Content="_Connect"></Button>
+            <Button x:Name="btnConnect" Grid.Row="0"  Grid.Column="3" Content="_Connect"></Button>
             <Button x:Name="btnFetch" Grid.Row="1"  Grid.Column="3" Content="_Fetch"></Button>
             <TextBox x:Name="txtTemplate" Grid.Row="1" Grid.Column="1"/>
             <ComboBox x:Name="comboTemplate" Grid.Row="2" Grid.Column="1"></ComboBox>
