@@ -11,6 +11,7 @@
                     Hooked -datastore parameter into the GUI
                     Changed creation of some devices to use enumeration of existing devices
                     Fixed path bug for copied disks
+    09/11/18  GRL   Added support for E1000 and VMxnet2 NICs
 #>
 
 <#
@@ -831,7 +832,11 @@ if( ! $noGui )
 }
 else
 {
-    ## Get list of template VMs
+    if( $linkedClone -and [string]::IsNullOrEmpty( $snapshot ) )
+    {
+        Throw "Must specify an existing snapshot for linked clones via -snapshot"
+    }
+
     [array]$templates = @( Get-VM -Name "*$templateName*" | Where-Object { $_.PowerState -eq 'PoweredOff' } )
 
     if( ! $templates -or ! $templates.Count )
@@ -862,7 +867,7 @@ else
 
 if( $count -gt 1 -and $chosenName -notmatch '%d' )
 {
-    Throw "When creating multiple clones, the name must contain %d which will be replaced by the number of the clone"
+    Throw 'When creating multiple clones, the name must contain %d which will be replaced by the number of the clone'
 }
 
 [array]$sourceDisks = @( $chosenTemplate | Get-HardDisk )
@@ -944,8 +949,8 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
             $newDevice.Device = $existingDevice
             $spec.deviceChange += $newDevice
         }
-        elseif( $_ -is [VMware.Vim.VirtualUSBXHCIController] -or $_ -is [VMware.Vim.VirtualE1000e] -or $_ -is [VMware.Vim.VirtualVmxnet3]  -or $_ -is [VMware.Vim.VirtualFloppy] `
-            -or $_ -is [VMware.Vim.VirtualUSBController] -or $_ -is [VMware.Vim.VirtualHdAudioCard]-or $_ -is [VMware.Vim.VirtualParallelPort]-or $_ -is [VMware.Vim.VirtualSerialPort] )
+        elseif( $_ -is [VMware.Vim.VirtualUSBXHCIController] -or $_ -is [VMware.Vim.VirtualE1000e] -or $_ -is [VMware.Vim.VirtualE1000] -or $_ -is [VMware.Vim.VirtualVmxnet3] -or $_ -is [VMware.Vim.VirtualVmxnet2] `
+            -or $_ -is [VMware.Vim.VirtualFloppy] -or $_ -is [VMware.Vim.VirtualUSBController] -or $_ -is [VMware.Vim.VirtualHdAudioCard]-or $_ -is [VMware.Vim.VirtualParallelPort]-or $_ -is [VMware.Vim.VirtualSerialPort] )
         {
             $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
             $newDevice = New-Object VMware.Vim.VirtualDeviceConfigSpec
@@ -1130,7 +1135,7 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
                     [string]$baseSourceDiskName = (($sourceDisk.FileName -replace '-\d{6}\.vmdk$' , '') -split '/')[-1]
                     $theSourceDisk = $sourceDisks | Where-Object { $_.FileName -match "$($baseSourceDiskName)\.vmdk" -or $_.FileName -match "$($baseSourceDiskName)-\d{6}\.vmdk" }
                     [string]$destinationDisk = "{0}/{1}" -f (Split-Path -Path $cloneVM.ExtensionData.Config.Files.VmPathName -Parent) , $newDiskName
-                    ## Add disk to VM
+
                     $result = Add-NewDisk -VM $cloneVM -sourceDisk $theSourceDisk -newDisk $destinationDisk
                     if( ! $result )
                     {
@@ -1153,7 +1158,7 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
                 }
             }
         }
-        else
+        else ## not linked clone
         {
             if( $snapshots -and $snapshots.Count )
             {
@@ -1171,7 +1176,7 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
         $poweredOn = Start-VM -VM $cloneVM
         if( ! $poweredOn -or $poweredOn.PowerState -ne 'PoweredOn' )
         {
-            Write-Warning "Failed to power on `"$($cloneVM.Name)`""
+            Write-Warning "Error powering on `"$($cloneVM.Name)`""
         }
     }
 }
