@@ -3,6 +3,8 @@
 
     @guyrleech 2018
 
+    THIS SCRIPT COMES WITH ABSOLUTELY NO WARRANTY. USE AT YOUR OWN RISK. THE AUTHOR CANNOT BE HELD RESPONSIBLE FOR ANY UNDESIRABLE SCRIPT BEHAVIOURS.
+
     Modification History:
 
     04/11/18  GRL   Added -linkedClone, -username, -password and -waitToExit parameters
@@ -12,6 +14,10 @@
                     Changed creation of some devices to use enumeration of existing devices
                     Fixed path bug for copied disks
     09/11/18  GRL   Added support for E1000 and VMxnet2 NICs
+                    Added time report in verbose mode
+    20/12/18  GRL   Added option to protect parent disk in linked clone from deletion
+                    Validation checks VM name(s) does not exist already
+                    Option to start clone numbering from >1
 #>
 
 <#
@@ -56,9 +62,17 @@ Ticks the box in the GUI to enable linked clones
 
 The number of clones to create
 
+.PARAMETER startFrom
+
+The number to start the cloning naming from.
+
 .PARAMETER notes
 
 Notes to assign to the created VM(s)
+
+.PARAMETER protect
+
+Edit the parent disk(s) of linked clones to protect them such that they are not deleted when the linked clone is deleted
 
 .PARAMETER powerOn
 
@@ -128,6 +142,7 @@ Param
     [string]$snapshot ,
     [switch]$noGui ,
     [int]$count = 1 ,
+    [int]$startFrom = 1 ,
     [string]$notes ,
     [switch]$powerOn ,
     [switch]$noConnect ,
@@ -135,6 +150,7 @@ Param
     [switch]$linkedClone ,
     [string]$username ,
     [string]$password ,
+    [switch]$protect ,
     ## Parameters to override what comes from template
     [int]$numCpus ,
     [int]$numCores ,
@@ -270,6 +286,12 @@ Function Validate-Fields( $guiobject )
         return $false
     }
     $result = $null
+    [int]$clonesStartFrom = -1
+    if( ! [int]::TryParse( $WPFtxtCloneStart.Text , [ref]$clonesStartFrom ) -or $clonesStartFrom -lt 0 )
+    {
+        $null = Display-MessageBox -window $guiobject -text 'Specified clone numbering start value is invalid' -caption 'Unable to Clone' -buttons OK -icon Error
+        return $false
+    }
     if( ! [int]::TryParse( $WPFtxtNumberClones.Text , [ref]$result ) -or ! $result )
     {
         $null = Display-MessageBox -window $guiobject -text 'Specified number of clones is invalid' -caption 'Unable to Clone' -buttons OK -icon Error
@@ -280,6 +302,7 @@ Function Validate-Fields( $guiobject )
         $null = Display-MessageBox -window $guiobject -text 'Must specify %d replacement pattern in the VM name when creating more than one clone' -caption 'Unable to Clone' -buttons OK -icon Error
         return $false
     }
+    
     if( $result -eq 1 -and $WPFtxtVMName.Text -match '%' )
     {
         $null = Display-MessageBox -window $guiobject -text 'Illegal character ''%'' in VM name - did you mean to make more than one clone ?' -caption 'Unable to Clone' -buttons OK -icon Error
@@ -289,6 +312,25 @@ Function Validate-Fields( $guiobject )
     {
         $null = Display-MessageBox -window $guiobject -text 'Illegal character(s) in VM name' -caption 'Unable to Clone' -buttons OK -icon Error
         return $false
+    }
+    if( ( $result -eq 1 -or $WPFtxtVMName.Text -notmatch '%d' ) -and ( Get-VM -Name $WPFtxtVMName.Text -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $WPFtxtVMName.Text } ) ) ## must check exact name match
+    {
+        $null = Display-MessageBox -window $guiobject -text "VM `"$($WPFtxtVMName.Text)`" already exists" -caption 'Unable to Clone' -buttons OK -icon Error
+        return $false
+    }
+    if( $result -gt 1 )
+    {
+        [string[]]$existing = $null
+        $clonesStartFrom..($result + $clonesStartFrom - 1) | ForEach-Object `
+        {
+            [string]$thisVMName = $WPFtxtVMName.Text -replace '%d' , $_
+            $existing += @( Get-VM -Name $thisVMName -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $thisVMName } | Select -ExpandProperty Name )
+        }
+        if( $existing -and $existing.Count )
+        {
+            $null = Display-MessageBox -window $guiobject -text "VMs `"$($existing -join '","')`"  already exist" -caption 'Unable to Clone' -buttons OK -icon Error
+            return $false
+        }
     }
     if( ! [int]::TryParse( $WPFtxtMemory.Text , [ref]$result ) -or ! $result )
     {
@@ -462,7 +504,7 @@ Function New-ClonedDisk
         $sourceDisk ,
         [string]$destinationDatastore ,
         [string]$parent ,
-        [int]$diskCount
+        [int]$diskCount 
     )
     [string]$baseDiskName = [io.path]::GetFileNameWithoutExtension( ( Split-Path $sourceDisk.FileName -Leaf ) )
     Write-Verbose "Cloning `"$baseDiskName`" , format $($sourceDisk.StorageFormat) to [$destinationDatastore] $($cloneVM.Name)"
@@ -589,10 +631,12 @@ if( ! $noConnect -and ! [string]::IsNullOrEmpty( $esxihost ) )
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:WpfApplication1"
         mc:Ignorable="d"
-        Title="ESXi VM Cloner" Height="487.015" Width="430.5" FocusManager.FocusedElement="{Binding ElementName=txtTargetComputer}">
+        Title="ESXi VM Cloner" Height="520.399" Width="442.283" FocusManager.FocusedElement="{Binding ElementName=txtTargetComputer}">
     <Grid Margin="10,10,46,13" >
         <Grid VerticalAlignment="Top" Height="345" Margin="0,20,0,0">
             <Grid.RowDefinitions>
+                <RowDefinition></RowDefinition>
+                <RowDefinition></RowDefinition>
                 <RowDefinition></RowDefinition>
                 <RowDefinition></RowDefinition>
                 <RowDefinition></RowDefinition>
@@ -628,9 +672,9 @@ if( ! $noConnect -and ! [string]::IsNullOrEmpty( $esxihost ) )
             <TextBlock Grid.Row="8" Grid.Column="0" Text="Datastore"></TextBlock>
             <TextBlock Grid.Row="9" Grid.Column="0" Text="Notes"></TextBlock>
             <TextBlock Grid.Row="10" Grid.Column="0" Text="Number of Clones"></TextBlock>
-            <TextBlock Grid.Row="11" Grid.Column="0"></TextBlock>
-            <TextBlock Grid.Row="12" Grid.Column="0" Text="Options:"></TextBlock>
-            <TextBlock Grid.Row="13" Grid.Column="0" Text=""></TextBlock>
+            <TextBlock Grid.Row="11" Grid.Column="0" Text="Clones Start From"></TextBlock>
+            <TextBlock Grid.Row="13" Grid.Column="0" Text="Options:"></TextBlock>
+            <TextBlock Grid.Row="14" Grid.Column="0" Text=""></TextBlock>
 
             <TextBox x:Name="txtESXiHost" Grid.Row="0" Grid.Column="1"></TextBox>
             <Button x:Name="btnConnect" Grid.Row="0"  Grid.Column="3" Content="_Connect"></Button>
@@ -645,18 +689,20 @@ if( ! $noConnect -and ! [string]::IsNullOrEmpty( $esxihost ) )
             <ComboBox x:Name="comboDatastore" Grid.Row="8" Grid.Column="1" Text="5"></ComboBox>
             <TextBox x:Name="txtNotes" Grid.Row="9" Grid.Column="1"></TextBox>
             <TextBox x:Name="txtNumberClones" Grid.Row="10" Grid.Column="1" Text="1"></TextBox>
+            <TextBox x:Name="txtCloneStart" Grid.Row="11" Grid.Column="1" Text="1"></TextBox>
             <ComboBox x:Name="comboMemoryUnits" Grid.Row="7" Grid.Column="2" Text="5">
                 <ComboBoxItem Content="MB" FontSize="9" IsSelected="True"/>
                 <ComboBoxItem Content="GB" FontSize="9"/>
             </ComboBox>
 
-            <CheckBox x:Name="chkLinkedClone" Content="_Linked Clone Disks" Grid.Row="12" Grid.Column="1"/>
-            <CheckBox x:Name="chkStart" Content="_Start after Creation" Grid.Row="13" Grid.Column="1"/>
-            <CheckBox x:Name="chkSaveSettings" Content="Sa_ve Settings" Grid.Row="14" Grid.Column="1" IsChecked="True"/>
-            <CheckBox x:Name="chkDisconnect" Content="_Disconnect on Exit" Grid.Row="15" Grid.Column="1"/>
+            <CheckBox x:Name="chkLinkedClone" Content="_Linked Clone Disks" Grid.Row="13" Grid.Column="1"/>
+            <CheckBox x:Name="chkProtectParent" Content="_Protect Parent Disks" Grid.Row="14" Grid.Column="1"/>
+            <CheckBox x:Name="chkStart" Content="_Start after Creation" Grid.Row="15" Grid.Column="1"/>
+            <CheckBox x:Name="chkSaveSettings" Content="Sa_ve Settings" Grid.Row="16" Grid.Column="1" IsChecked="True"/>
+            <CheckBox x:Name="chkDisconnect" Content="_Disconnect on Exit" Grid.Row="17" Grid.Column="1"/>
         </Grid>
-        <Button x:Name="btnOk" Content="OK" HorizontalAlignment="Left" Height="31" Margin="8,381,0,0" VerticalAlignment="Top" Width="90" IsDefault="True"/>
-        <Button x:Name="btnCancel" Content="Cancel" HorizontalAlignment="Left" Height="31" Margin="122,381,0,0" VerticalAlignment="Top"  Width="90" IsDefault="False" IsCancel="True"/>
+        <Button x:Name="btnOk" Content="OK" HorizontalAlignment="Left" Height="31" Margin="10,412,0,0" VerticalAlignment="Top" Width="90" IsDefault="True"/>
+        <Button x:Name="btnCancel" Content="Cancel" HorizontalAlignment="Left" Height="31" Margin="116,412,0,0" VerticalAlignment="Top"  Width="90" IsDefault="False" IsCancel="True"/>
     </Grid>
 </Window>
 '@
@@ -735,7 +781,8 @@ if( ! $noGui )
     })
     $WPFbtnOk.add_Click({
         $_.Handled = $true
-        if( Validate-Fields -guiobject $mainForm )
+        $validated = Validate-Fields -guiobject $mainForm
+        if( $validated -eq $true )
         {
             $mainForm.DialogResult = $true
             $mainForm.Close()
@@ -758,6 +805,9 @@ if( ! $noGui )
         $_.Handled = $true
         $WPFcomboSnapshot.IsEnabled = $false
     })
+    $WPFtxtCloneStart.Text = $startFrom
+    $WPFtxtNumberClones.Text = $count
+    $WPFchkProtectParent.IsChecked = $protect
     $WPFchkLinkedClone.IsChecked = $linkedClone
     $WPFchkStart.IsChecked = $powerOn
     $WPFtxtESXiHost.Text = $esxihost
@@ -814,12 +864,14 @@ if( ! $noGui )
     $chosenCPUs = $WPFtxtCPUs.Text
     $chosenCores = $WPFtxtCoresPerCpu.Text
     $count = $WPFtxtNumberClones.Text
+    $startFrom = $WPFtxtCloneStart.Text
     $notes = $WPFtxtNotes.Text
     if( $WPFchkLinkedClone.IsChecked )
     {
         $snapshot = $WPFcomboSnapshot.SelectedItem
     }
     $powerOn = $WPFchkStart.IsChecked
+    $protect = $WPFchkProtectParent.IsChecked
     if( $WPFchkSaveSettings )
     {   
         if( ! ( Test-Path $configRegKey -ErrorAction SilentlyContinue ) )
@@ -870,11 +922,12 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
     Throw 'When creating multiple clones, the name must contain %d which will be replaced by the number of the clone'
 }
 
+[datetime]$startTime = [datetime]::Now
+
 [array]$sourceDisks = @( $chosenTemplate | Get-HardDisk )
 
-1..$count | ForEach-Object `
+For( [int]$vmNumber = $startFrom ; $vmNumber -lt $startFrom + $count ; $vmNumber++ )
 {
-    [int]$vmNumber = $_
     [string]$thisChosenName = if( $count -gt 1 ) { $chosenName -replace '%d',$vmNumber } else { $chosenName }
 
     Write-Verbose "Creating VM # $vmNumber : $thisChosenName"
@@ -1084,6 +1137,7 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
                     Copy-DatastoreItem -Item $source -Destination $tempDisk
                     $destinationBinaryDisk = $null
                     $sourceBinaryDisk = $null
+                    [string]$parentFileName = $null
                     $existingContent = Get-Content -Path $tempDisk
                     $null = Get-Random -SetSeed ([datetime]::Now.Ticks % [int]::MaxValue)
                     $newCID = ([int]"0x$(((1..4 | %{ "{0:x}" -f (Get-Random -Max 256) } ) -join ''))").ToString('x8') ## needs to be 8 hex digits
@@ -1097,12 +1151,13 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
                         {
                             if( $sourceDatastore -eq $destinationDatastore )
                             {
-                                "parentFileNameHint=""../$sourceParentFolder/$($Matches[1])"""
+                                $parentFileName = "../$sourceParentFolder/$($Matches[1])"
                             }
                             else
                             {
-                                "parentFileNameHint=""../../$($sourceDatastore)/$sourceParentFolder/$($Matches[1])"""
+                                $parentFileName = "../../$($sourceDatastore)/$sourceParentFolder/$($Matches[1])"
                             }
+                            "parentFileNameHint=""$parentFileName"""
                         }
                         elseif( $_ -match "(.*) ""$sourceBaseDiskName-(\d{6})-(.*)\.vmdk""$" )
                         {
@@ -1127,7 +1182,46 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
                     ## Copy back to cloned VM's folder
                     Copy-DatastoreItem -Destination $destinationFolder -Item $tempDisk -Force -ErrorAction Continue
                     Remove-Item -Path $tempDisk -Force
+                    if( $protect )
+                    {
+                        if( $parentFileName )
+                        {
+                            ## Need to add "ddb.deletable = "false"" to parent vmdk if not there already in the ddb section
+                            ## Copy the disk locally, edit and put back
+                            [string]$parentDisk = "$sourceFolder/$(($parentFileName -split '/')[-1])"
+                            Copy-DatastoreItem -Item $parentDisk -Destination $tempDisk
+                            $existingContent = Get-Content -Path $tempDisk
+                            [string]$deletable = $null
+                            $newContent = $existingContent | ForEach-Object `
+                            {
+                                if( $_-match '^ddb\.deletable\s+=\s+"(.*)"' )
+                                {
+                                    $deletable = $Matches[1]
+                                }
+                                else
+                                {
+                                    $_
+                                }
+                            }
+                            if( ! $deletable -or $deletable -eq 'true' )
+                            {
+                                $newContent += 'ddb.deletable = "false"'
+                                [string]::Join( "`n" , $newContent ) | Set-Content -Path $tempDisk -Force
+                                ## Copy back to parent VM's folder
+                                Copy-DatastoreItem -Destination $parentDisk -Item $tempDisk -Force -ErrorAction Continue
+                                Remove-Item -Path $tempDisk -Force
+                            }
+                            else
+                            {
+                                Write-Warning "Disk `"$parentDisk`" is already protected so no changes made"
+                            }
+                        }
+                        else
+                        {
+                            Write-Warning "Unable to protect parent disk as found no reference to it in `"$source`""
+                        }
 
+                    }
                     ## Copy the binary differencing disk but can't do with Copy-HardDisk as will copy the parent too
                     Copy-DatastoreItem -Item ($sourceFolder + '\' + $sourceBinaryDisk ) -Destination $destinationFolder
                     Move-Item -Path (Join-Path $destinationFolder $sourceBinaryDisk) -Destination (Join-Path $destinationFolder $destinationBinaryDisk)
@@ -1180,6 +1274,8 @@ if( $count -gt 1 -and $chosenName -notmatch '%d' )
         }
     }
 }
+
+Write-Verbose "$count VMs cloned in $([math]::Round((New-TimeSpan -Start $startTime -End ([datetime]::Now)).TotalSeconds,2)) seconds"
 
 if( $disconnect )
 {
