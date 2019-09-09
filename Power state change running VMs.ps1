@@ -2,6 +2,10 @@
     Pause or shutdown running VMs - designed to be run by UPS shutdown software
 
     @guyrleech 2019
+
+    Modification History:
+
+    09/09/19   GRL   Added manual input of password when encrypting it for later use
 #>
 
 <#
@@ -27,7 +31,7 @@ A password previously encrypted using the -encryptPassword argument
 
 .PARAMETER encryptPassword
 
-Encrypt the password specified via -password in the the environment varinble _Mval12 
+Encrypt the password specified via -password, in the environment variable _Mval12 or prompt if neither is present
 
 .PARAMETER vm
 
@@ -59,6 +63,12 @@ Shutdown the VMs instead of pausing them. Note that if there are outstanding Win
 
 Pause all VMs running on esxi01, except for the VM running this script and then shutdown the host esxi01. A log file will be written to c:\scripts\vm.shutdown.log
 
+.EXAMPLE
+
+& '.\Power state change running VMs.ps1" -encryptPassword
+
+Prompt for a password, encrypt it and output it such that it can be passed in another script invocation via the -securePassword parameter
+
 .NOTES
 
 Save credentials first with New-VICredentialStoreItem, for the account that will run the script, if pass thru won't work and not passing username and password
@@ -88,10 +98,20 @@ if( $encryptPassword )
 {
     if( ! $PSBoundParameters[ 'password' ] -and ! ( $password = $env:_Mval12 ) )
     {
-        Throw 'Must specify the username''s password when encrypting via -password or _Mval12 environment variable'
+        $enteredPassword = Read-Host -Prompt "Enter password to encrypt" -AsSecureString
+        if( $enteredPassword -and $enteredPassword.Length )
+        {
+            $enteredPassword | ConvertFrom-SecureString
+        }
+        else
+        {
+            Throw 'No password entered'
+        }
     }
-    
-    ConvertTo-SecureString -AsPlainText -String $password -Force | ConvertFrom-SecureString
+    else
+    {
+        ConvertTo-SecureString -AsPlainText -String $password -Force | ConvertFrom-SecureString
+    }
     Exit 0
 }
 
