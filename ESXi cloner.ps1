@@ -18,6 +18,7 @@
     20/12/18  GRL   Added option to protect parent disk in linked clone from deletion
                     Validation checks VM name(s) does not exist already
                     Option to start clone numbering from >1
+    16/09/19  GRL   Fixed issue with duplicate MAC addresses
 #>
 
 <#
@@ -160,6 +161,21 @@ Param
     [int]$maxVmdkDescriptorSize = 10KB ,
     [string]$configRegKey = 'HKCU:\Software\Guy Leech\ESXi Cloner' 
 )
+
+## Adding so we can make it app modal as well as system
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace PInvoke.Win32
+{
+    public static class Windows
+    {
+        [DllImport("user32.dll")]
+        public static extern int MessageBox(int hWnd, String text, String caption, uint type);
+    }
+}
+'@
 
 #region Functions
 Function Get-Templates
@@ -352,7 +368,7 @@ Function Validate-Fields( $guiobject )
 
 Function Display-MessageBox( $window , $text , $caption , [System.Windows.MessageBoxButton]$buttons , [System.Windows.MessageBoxImage]$icon )
 {
-    if( $window -and $window.Handle )
+    if( $window -and $window.PSObject.Properties[ 'handle' ] -and $window.Handle )
     {
         [int]$modified = switch( $buttons )
             {
@@ -1008,6 +1024,12 @@ For( [int]$vmNumber = $startFrom ; $vmNumber -lt $startFrom + $count ; $vmNumber
             $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
             $newDevice = New-Object VMware.Vim.VirtualDeviceConfigSpec
             $newDevice.operation = 'add'
+            if( $existingDevice -and $existingDevice.PSObject.Properties[ 'AddressType' ] -and $existingDevice.PSObject.Properties[ 'MacAddress' ] )
+            {
+                ## need to change MAC address
+                $existingDevice.AddressType = 'generated'
+                $existingDevice.MacAddress = $null
+            }
             $newDevice.Device = $existingDevice
             $spec.deviceChange += $newDevice
         }
