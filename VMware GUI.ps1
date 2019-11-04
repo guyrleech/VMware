@@ -858,30 +858,30 @@ Get-Variable -Name WPF*|Select-Object -ExpandProperty Name | Write-Debug
 [bool]$alreadyConnected = $false
 
 ## see if already connected and if so if it is the server we are told to connect to
-if( Get-Variable -Scope Global -Name DefaultVIServers )
+if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyContinue )
 {
-    $existingServer = @( $global:DefaultVIServers | Select-Object -Property Name )
+    $existingServer = @( $global:DefaultVIServers | Select-Object -ExpandProperty Name )
     if( $existingServer -and $existingServer.Count )
     {
+        Write-Verbose -Message "Already connected to $($existingServer -join ' , ')"
         $server = $existingServer
-        Write-Verbose "Already connected to $(($server|Select-Object -Property Name) -join ' , ')"
 
         ## Check not connected to same server
         [hashtable]$connections = @{}
-        ForEach( $serverConnection in $global:DefaultVIServers )
+        ForEach( $serverConnection in $existingServer )
         {
             try
             {
-                $dns = Resolve-DnsName -Name $serverConnection -ErrorAction SilentlyContinue
+                $dns = Resolve-DnsName -Name $serverConnection -ErrorAction SilentlyContinue -Verbose:$false
                 if( $dns )
                 {
-                    $connections.Add( $dns.IPAddress , $serverConnection.Name  )
+                    $connections.Add( $dns.IPAddress , $serverConnection  )
                 }
             }
             catch
             {
                 $sameServer = $connections[ $dns.IPAddress ]
-                Throw "Multiple connections to same VMware server $($serverConnection.Name) and $($sameServer) with IP address $($dns.IPAddress)"
+                Throw "Multiple connections to same VMware server $serverConnection and $sameServer with IP address $($dns.IPAddress)"
             }
         }
     }
