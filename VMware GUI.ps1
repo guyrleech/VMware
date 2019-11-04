@@ -3,6 +3,7 @@
     Modification History:
 
     @guyrleech 04/11/2019  Initial release
+    @guyrleech 04/11/2019  Added client drive mapping to rdp file created for credentials and added -extraRDPSettings parameter
 #>
 
 <#
@@ -54,6 +55,10 @@ Connect to vCenter using the credentials running the script (where windows domai
 
 Do not attempt to run vmrc.exe when launching the VMware console for a VM
 
+.PARAMETER noRdpFile
+
+DO not create an .rdp file to specify the username for mstsc
+
 .PARAMETER showPoweredOn
 
 Include powered on VMs in the GUI display
@@ -69,6 +74,10 @@ Include suspended VMs in the GUI display
 .PARAMETER showAll
 
 Show VMs in all power states in the GUI
+
+.PARAMETER extraRDPSettings
+
+Extra settings to put into the .rdp file created to specify username for mstsc to connect to
 
 .PARAMETER sortProperty
 
@@ -90,6 +99,9 @@ Show all VMs on the VMware server stored in the registry using the encrypted cre
 .NOTES
 
 The latest VMware PowerCLI module required by the script can be installed if you have internet access by running the following PowerShell command as an administrator "Install-Module -Name VMware.PowerCLI"
+
+RDP file settings for -extraRDPSettings option available at https://docs.microsoft.com/en-us/windows-server/remote/remote-desktop-services/clients/rdp-files
+
 #>
 
 [CmdletBinding()]
@@ -107,11 +119,13 @@ Param
     [switch]$ipv6 ,
     [switch]$passThru ,
     [switch]$webConsole ,
+    [switch]$noRdpFile ,
     [bool]$showPoweredOn = $true,
     [bool]$showPoweredOff ,
     [bool]$showSuspended ,
     [switch]$showAll ,
     [string]$sortProperty = 'Name' ,
+    [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
     [string]$vmwareModule = 'VMware.PowerCLI'
 )
@@ -1019,12 +1033,15 @@ elseif( $passThru )
 }
 
 [string]$rdpFileName = $null
-if( $rdpCredential -and $rdpCredential.Count )
+if( ! $noRdpFile )
 {
-    ## Write username and domain to rdp file to pass to mstsc
-    $rdpFileName = Join-Path -Path $env:temp -ChildPath "grl.$pid.rdp"
-    Write-Verbose "Writing $($rdpUsername -join ' , ') to $rdpFileName"
-    $rdpCredential | Out-File -FilePath $rdpFileName
+    if( $rdpCredential -and $rdpCredential.Count )
+    {
+        ## Write username and domain to rdp file to pass to mstsc
+        $rdpFileName = Join-Path -Path $env:temp -ChildPath "grl.$pid.rdp"
+        Write-Verbose "Writing $($rdpUsername -join ' , ') to $rdpFileName"
+        $rdpCredential + $extraRDPSettings | Out-File -FilePath $rdpFileName
+    }
 }
 
 if( ! ( Test-Path -Path $regKey -ErrorAction SilentlyContinue ) )
