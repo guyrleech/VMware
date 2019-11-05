@@ -4,6 +4,7 @@
 
     @guyrleech 04/11/2019  Initial release
     @guyrleech 04/11/2019  Added client drive mapping to rdp file created for credentials and added -extraRDPSettings parameter
+    @guyrleech 05/11/2019  Added code to reconnect to VMware if errors with "not connected", e.g. times out. Fixed bug where can't take snapshot or consolidate disks if no snapshots exist
 #>
 
 <#
@@ -424,7 +425,7 @@ Function Add-TreeItem
 
     $ChildItem = New-Object System.Windows.Controls.TreeViewItem
     $ChildItem.Header = $Name
-    $ChildItem.Name = $Name -replace '[\s,;:]' , '_' -replace '%252f' , '_' # default snapshot names have / for date which are escaped
+    $ChildItem.Name = $Name -replace '[\s,;:\.]' , '_' -replace '%252f' , '_' # default snapshot names have / for date which are escaped
     $ChildItem.Tag = $Tag
     $ChildItem.IsExpanded = $true
     ##[Void]$ChildItem.Items.Add("*")
@@ -538,8 +539,7 @@ Function Show-SnapShotWindow
     [array]$theseSnapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vm -ErrorAction SilentlyContinue )
     if( ! $theseSnapshots -or ! $theseSnapshots.Count )
     {
-            [void][Windows.MessageBox]::Show( "No snapshots found for $($vm.name)" , 'Snapshot Management' , 'Ok' ,'Warning' )
-            return
+        [void][Windows.MessageBox]::Show( "No snapshots found for $($vm.name)" , 'Snapshot Management' , 'Ok' ,'Warning' )
     }
 
     $snapshotsForm = Load-GUI -inputXaml $snapshotsXAML
@@ -1108,13 +1108,25 @@ $WPFbtnFilter.Add_Click({
         $script:showPoweredOff = $wpfchkPoweredOff.IsChecked
         $script:showSuspended = $wpfchkSuspended.IsChecked
         $script:vmName = $WPFtxtVMName.Text
-        $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+        $getError = $null
+        $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable $getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+        if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+        {
+            $connection = Connect-VIServer @connectParameters
+            [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+        }
         Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
     }
     $_.Handled = $true
 })
 
 $WPFbtnRefresh.Add_Click({
+    $getError = $null
+    if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+    {
+        $connection = Connect-VIServer @connectParameters
+        [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+    }
     $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
     Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
     $_.Handled = $true
