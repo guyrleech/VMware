@@ -4,7 +4,7 @@
 
     @guyrleech 04/11/2019  Initial release
     @guyrleech 04/11/2019  Added client drive mapping to rdp file created for credentials and added -extraRDPSettings parameter
-    @guyrleech 05/11/2019  Added code to reconnect to VMware if errors with "not connected", e.g. times out. Fixed bug where can't take snapshot or consolidate disks if no snapshots exist
+    @guyrleech 05/11/2019  Added code to reconnect to VMware if errors with "not connected", e.g. times out. Fixed bug where can't take snapshot or consolidate disks if no snapshots exist. Improved mstsc address detection logic. Fixes when already connected to VMware
 #>
 
 <#
@@ -425,7 +425,7 @@ Function Add-TreeItem
 
     $ChildItem = New-Object System.Windows.Controls.TreeViewItem
     $ChildItem.Header = $Name
-    $ChildItem.Name = $Name -replace '[\s,;:\.]' , '_' -replace '%252f' , '_' # default snapshot names have / for date which are escaped
+    $ChildItem.Name = $Name -replace '[\s,;:\.\-]' , '_' -replace '%252f' , '_' # default snapshot names have / for date which are escaped
     $ChildItem.Tag = $Tag
     $ChildItem.IsExpanded = $true
     ##[Void]$ChildItem.Items.Add("*")
@@ -652,12 +652,27 @@ Function Process-Action
             [string]$address = $null
             if( $Operation -eq 'mstsc' )
             {
-                ## TODO implement width, height, admin, etc in settings
-                ## See if we can resolve its name otherwise we will try its IP addresses
-                if( ! ( $address = $vm.guest.HostName ) )
+                if( $vm.PowerState -ne 'PoweredOn' )
                 {
-                    $vm.'IP Addresses' -split ',' | ForEach-Object `
+                    [void][Windows.MessageBox]::Show( "Power state of $($vm.Name) is $($vm.PowerState) so cannot mstsc to it" , 'Mstsc Error' , 'Ok' ,'Error' )
+                    return
+                }
+                ## See if we can resolve its name otherwise we will try its IP addresses
+                [string]$address = $null
+                if( $vm.PSObject.Properties[ 'Guest' ] -and $vm.guest )
+                {
+                    $address = $vm.guest.HostName
+                }
+
+                if( ! $address -or ! ( Resolve-DnsName -Name $address -ErrorAction SilentlyContinue -QuickTimeout ))
+                {
+                    Write-Warning "Unable to resolve $address for $($vm.Name) so looking for an IP address to use"
+
+                    $address = $null
+                    ## Sort addresses so get 192. addresses before 172. or 10. ones which are more likely to be reachable
+                    $vm.Guest | Select-Object -ExpandProperty IPAddress | Where-Object { $_ -match $script:addressPattern -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notmatch '^169\.254\.' } | Sort-Object -Descending | ForEach-Object `
                     {
+                        Write-Verbose "Testing connectivity to port $rdpPort on $PSItem"
                         $connection = Test-NetConnection -ComputerName $PSItem -Port $rdpPort -ErrorAction SilentlyContinue
                         if( $connection -and ! $address )
                         {
@@ -665,9 +680,15 @@ Function Process-Action
                         }
                     }
                 }
+                elseif( ! $vm.PSObject.Properties[ 'Guest' ] -or ! $vm.Guest )
+                {
+                    [void][Windows.MessageBox]::Show( "Cannot resolve $address for $($vm.Name) and no guest info" , 'Mstsc Error' , 'Ok' ,'Error' )
+                    return
+                }
         
                 if( $address )
                 {
+                    Write-Verbose "Launching mstsc to $address"
                     [string]$arguments = "$rdpFileName /v:$($address):$rdpPort"
                     if( ! [string]::IsNullOrEmpty( $mstscParams ))
                     {
@@ -879,6 +900,7 @@ if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyConti
     {
         Write-Verbose -Message "Already connected to $($existingServer -join ' , ')"
         $server = $existingServer
+        $alreadyConnected = $true
 
         ## Check not connected to same server
         [hashtable]$connections = @{}
@@ -898,13 +920,15 @@ if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyConti
                 Throw "Multiple connections to same VMware server $serverConnection and $sameServer with IP address $($dns.IPAddress)"
             }
         }
+        Remove-Variable -Name connections
     }
 }
 
 ## if we have no server then see if saved in registry
-if( ! $PSBoundParameters[ 'server' ] )
+if( [string]::IsNullOrEmpty( $server ) )
 {
     $server = (Get-ItemProperty -Path $regKey -Name 'Server' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty 'Server') -split ','
+    Write-Verbose -Message "Retrieved server $server from registry"
 }
 
 if( ! $PSBoundParameters[ 'mstscParams' ] )
@@ -1139,4 +1163,8 @@ if( $rdpFileName )
     Remove-Item -Path $rdpFileName -Force -ErrorAction SilentlyContinue
 }
 
-$connection | Disconnect-VIServer -Force -Confirm:$false
+if( ! $alreadyConnected -and $connection )
+{
+    $connection | Disconnect-VIServer -Force -Confirm:$false
+}
+
