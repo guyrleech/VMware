@@ -5,6 +5,7 @@
     @guyrleech 04/11/2019  Initial release
     @guyrleech 04/11/2019  Added client drive mapping to rdp file created for credentials and added -extraRDPSettings parameter
     @guyrleech 05/11/2019  Added code to reconnect to VMware if errors with "not connected", e.g. times out. Fixed bug where can't take snapshot or consolidate disks if no snapshots exist. Improved mstsc address detection logic. Fixes when already connected to VMware
+    @guyrleech 06/11/2019  Fixed reconnection code if connection has timed out
 #>
 
 <#
@@ -951,6 +952,8 @@ if( ! $alreadyConnected -and ! $server -or ! $server.Count )
 
 $credential = $null
 
+[hashtable]$connectParameters = @{ 'Server' = $server ; 'Force' = $true }
+
 if( ! $alreadyConnected )
 {
     ## Connect and retrieve VMs, applying filter if there is one
@@ -1016,7 +1019,6 @@ if( ! $alreadyConnected )
         }
     }
 
-    [hashtable]$connectParameters = @{ 'Server' = $server ; 'Force' = $true }
     if( $credential )
     {
         Write-Verbose "Connecting to $($server -join ',') as $($credential.username)"
@@ -1076,9 +1078,6 @@ if( ! ( Test-Path -Path $regKey -ErrorAction SilentlyContinue ) )
 Set-ItemProperty -Path $regKey -Name 'Server' -Value ($server -join ',')
 Set-ItemProperty -Path $regKey -Name 'MstscParams' -Value $mstscParams
 
-## so we can acquire a ticket if required for vmrc remote console (will fail on ESXi)
-$Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
-
 [string]$addressPattern = $null
 
 if( ! $ipV6 )
@@ -1095,7 +1094,17 @@ if( ! $mainForm )
     return
 }
 
-[array]$snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName )
+[array]$snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName -ErrorVariable getError )
+
+if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+{
+    Write-Warning "Not connected to $($server -join ',') so reconnecting"
+    $connectParameters|Write-Verbose
+    $connection = Connect-VIServer @connectParameters
+}
+
+## so we can acquire a ticket if required for vmrc remote console (will fail on ESXi)
+$Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
 
 $datatable = New-Object -TypeName System.Data.DataTable
 
@@ -1133,7 +1142,7 @@ $WPFbtnFilter.Add_Click({
         $script:showSuspended = $wpfchkSuspended.IsChecked
         $script:vmName = $WPFtxtVMName.Text
         $getError = $null
-        $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable $getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+        $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
         if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
         {
             $connection = Connect-VIServer @connectParameters
@@ -1146,12 +1155,12 @@ $WPFbtnFilter.Add_Click({
 
 $WPFbtnRefresh.Add_Click({
     $getError = $null
+    $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
     if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
     {
         $connection = Connect-VIServer @connectParameters
         [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
     }
-    $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
     Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
     $_.Handled = $true
 })
