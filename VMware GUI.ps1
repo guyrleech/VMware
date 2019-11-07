@@ -9,6 +9,9 @@
                            Added Details button to Snapshot window and show date of last revert.
                            Add functionality to find existing mstsc window & activate unless -noreusemstsc.
                            Don't pass username via rdp file to mstsc if find saved credential for that connection.
+    @guyrleech 06/11/2019  Added message if VMware operation fails with "not connected" that should try clicking Refresh
+                           Pull username from existing VMware connection
+                           Event context menu added
 #>
 
 <#
@@ -88,6 +91,10 @@ Show VMs in all power states in the GUI
 
 Extra settings to put into the .rdp file created to specify username for mstsc to connect to
 
+.PARAMETER maxEvents
+
+The maximum number of events to retrieve from VMware
+
 .PARAMETER sortProperty
 
 The VM property to sort the display on.
@@ -134,6 +141,7 @@ Param
     [bool]$showSuspended ,
     [switch]$showAll ,
     [switch]$noReuseMstsc ,
+    [int]$maxEvents = 10000 ,
     [string]$sortProperty = 'Name' ,
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
@@ -165,6 +173,8 @@ $pinvokeCode = @'
         public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); 
 '@
 
+[string]$youAreHereSnapshot = 'YouAreHere' 
+
 #region XAML
 
 [string]$mainwindowXAML = @'
@@ -177,9 +187,9 @@ $pinvokeCode = @'
         mc:Ignorable="d"
         Title="Simple VMware Console (SVC) by @guyrleech" Height="500" Width="1000">
     <DockPanel Margin="10,10,10,10">
-        <Button x:Name="btnConnect" Content="Connect" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
-        <Button x:Name="btnFilter" Content="Filter" HorizontalAlignment="Left" Height="35" Margin="247,0,0,-35" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
-        <Button x:Name="btnRefresh" Content="Refresh" HorizontalAlignment="Left" Height="35" Margin="500,0,0,-35" Width="145" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
+        <Button x:Name="btnConnect" Content="_Connect" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
+        <Button x:Name="btnFilter" Content="_Filter" HorizontalAlignment="Left" Height="35" Margin="247,0,0,-35" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
+        <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="35" Margin="500,0,0,-35" Width="145" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
         <DataGrid HorizontalAlignment="Stretch" VerticalAlignment="Top" x:Name="VirtualMachines" >
             <DataGrid.ContextMenu>
                 <ContextMenu>
@@ -187,6 +197,7 @@ $pinvokeCode = @'
                     <MenuItem Header="Mstsc" x:Name="MstscContextMenu" />
                     <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
+                    <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
                     <MenuItem Header="Power" x:Name="PowerContextMenu">
                         <MenuItem Header="Power On" x:Name="PowerOnContextMenu" />
@@ -465,11 +476,20 @@ Function Process-Snapshot
     )
     
     $_.Handled = $true
+    
+    [bool]$closeDialogue = $true
+
+    if( ! $vmId )
+    {
+        [void][Windows.MessageBox]::Show( 'No VM id passed to Process-Snapshot' , $Operation , 'Ok' ,'Error' )
+        return
+    }
 
     if( $operation -eq 'ConsolidateSnapshot' )
     {
         $VM = Get-VM -Id $VMId
         $VM.ExtensionData.ConsolidateVMDisks_Task()
+        $closeDialogue = $false
     }
     elseif( $Operation -eq 'TakeSnapShot' )
     {
@@ -509,10 +529,30 @@ Function Process-Snapshot
     }
     elseif( $Operation -eq 'DetailsSnapshot' )
     {
+        $closeDialogue = $false
         $VM = Get-VM -Id $VMId
         if( $VM )
         {
-            $snapshot = Get-Snapshot -Id $GUIobject.SelectedItem.Tag -VM $vm
+            [string]$tag = $null
+            if( $GUIobject.SelectedItem -and $GUIobject.PSObject.Properties[ 'SelectedItem' ] )
+            {
+                $tag = $GUIobject.SelectedItem.Tag
+            }
+            elseif( $GUIobject.Items.Count -eq 1 )
+            {
+                ## if only one snapshot then report on that one
+                $tag = $GUIobject.Items[0].Tag
+            }
+            else
+            {
+                [void][Windows.MessageBox]::Show( 'No snapshot selected' , $Operation , 'Ok' ,'Error' )
+                return
+            }
+            if( $tag -eq $youAreHereSnapshot )
+            {
+                return
+            }
+            $snapshot = Get-Snapshot -Id $tag -VM $vm
             if( $snapshot )
             {
                 [string]$details = "Name = $($snapshot.Name)`n`rDescription = $($snapshot.Description)`n`rCreated = $(Get-Date -Date $snapshot.Created -Format G)`n`rSize = $([math]::Round( $snapshot.SizeGB , 2 ))GB`n`rPower State = $($snapshot.PowerState)`n`rQuiesced = $(if( $snapshot.Quiesced ) { 'Yes' } else {'No' })"
@@ -528,7 +568,7 @@ Function Process-Snapshot
             Write-Warning "Unable to get vm for vm id $vmid"
         }
     }
-    elseif( $GUIobject.SelectedItem -and $GUIobject.SelectedItem.Tag -and $GUIobject.SelectedItem.Tag -ne 'YouAreHere' )
+    elseif( $GUIobject.SelectedItem -and $GUIobject.SelectedItem.Tag -and $GUIobject.SelectedItem.Tag -ne $youAreHereSnapshot )
     {
         [string]$answer = 'yes'
         $answer = [Windows.MessageBox]::Show( "Are you sure you want to $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2') on $($vm.Name)?" , 'Confirm Snapshot Operation' , 'YesNo' ,'Question' )
@@ -565,10 +605,17 @@ Function Process-Snapshot
             }
         }
     }
+    else
+    {
+        $closeDialogue = $false
+    }
 
-    ## Close dialog since needs refreshing
-    $snapshotsForm.DialogResult = $true 
-    $snapshotsForm.Close()
+    if( $closeDialogue )
+    {
+        ## Close dialog since needs refreshing
+        $snapshotsForm.DialogResult = $true 
+        $snapshotsForm.Close()
+    }
 }
 
 Function Show-SnapShotWindow
@@ -631,7 +678,7 @@ Function Show-SnapShotWindow
         {
             if( ($currentSnapShotItem = Find-TreeItem -control $WPFtreeSnapshots -tag $currentSnapShotId ))
             {
-                Add-TreeItem -Name 'You are here' -Parent $currentSnapShotItem -Tag 'YouAreHere'
+                Add-TreeItem -Name '__You are here__' -Parent $currentSnapShotItem -Tag $youAreHereSnapshot
             }
             else
             {
@@ -695,10 +742,16 @@ Function Process-Action
     ForEach( $selectedVM in $selectedVMs )
     {
         ## Don't use VM cache here in case changed since cache made
-        $vm = VMware.VimAutomation.Core\Get-VM -Name $selectedVM.Name | Where-Object { $_.VMHost.Name -eq $selectedVM.Host }
+        $getError = $null
+        $vm = VMware.VimAutomation.Core\Get-VM -Name $selectedVM.Name -ErrorVariable getError | Where-Object { $_.VMHost.Name -eq $selectedVM.Host }
         if( ! $vm )
         {
-            Write-Warning -Message "Unable to get VM $($selectedVM.Name)"
+            [string]$message = "Unable to get VM $($selectedVM.Name)"
+            if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+            {
+                $string += '. Try clicking "Refresh" as no longer connected'
+            }
+            [void][Windows.MessageBox]::Show( $message , 'Action Error' , 'Ok' ,'Error' )
             return
         }
         elseif( $vm -is [array] )
@@ -879,6 +932,24 @@ Function Process-Action
                     VMware.VimAutomation.Core\Remove-VM -DeletePermanently -VM $vm -Confirm:$false
                 }
             }
+            elseif( $Operation -eq 'Events' )
+            {
+                [array]$events = @( Get-VIEvent -Entity $vm.name -MaxSamples $maxEvents )
+                if( $events -and $events.Count )
+                {
+                    $events | Select-Object -Property CreatedTime,UserName,FullFormattedMessage | Out-GridView -Title "$($events.Count) events for $($vm.Name)"
+                }
+                else
+                {
+                    $oldestEvent = Get-VIEvent -MaxSamples $maxEvents | Select-Object -Last 1
+                    [string]$message = "No events found for $($vm.Name)"
+                    if( $oldestEvent )
+                    {
+                        $message += " oldest of event is from $(Get-Date -Date $oldestEvent.CreatedTime -Format G). Retrieving $maxEvents at most"
+                    }
+                    [void][Windows.MessageBox]::Show( $message , 'Events Error' , 'Ok' ,'Warning' )
+                }
+            }
             else
             {
                 Write-Warning "Unknown operation $Operation"
@@ -991,13 +1062,18 @@ Add-Type -MemberDefinition $pinvokeCode -Name 'User32' -Namespace 'Win32' -Using
 ## see if already connected and if so if it is the server we are told to connect to
 if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyContinue )
 {
-    $existingServer = @( $global:DefaultVIServers | Select-Object -ExpandProperty Name )
-    if( $existingServer -and $existingServer.Count )
+    $existingServers = @( $global:DefaultVIServers )
+    if( $existingServers -and $existingServers.Count )
     {
+        [string]$existingServer = $existingServers|Select-Object -ExpandProperty Name
         Write-Verbose -Message "Already connected to $($existingServer -join ' , ')"
         $server = $existingServer
         $alreadyConnected = $true
-
+        if( ! $PSBoundParameters[ 'username' ] )
+        {
+            $username = $existingServers|Group-Object -Property User|Sort-Object -Property Count -Descending|Select-Object -First 1 -ExpandProperty Name
+        }
+        Write-Verbose -Message "Already connected to $($existingServer -join ' , ') username $username"
         ## Check not connected to same server
         [hashtable]$connections = @{}
         ForEach( $serverConnection in $existingServer )
@@ -1137,14 +1213,15 @@ if( ! $alreadyConnected )
 [string[]]$rdpCredential = $null
 
 ## Write to an rdp file so we can pass to mstsc in case on non-domain joined device or if using different credentials
-if( $credential )
+[string]$theUser = $null
+if( ($theUser = ($credential|Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue)) -or ($theUser = $username ))
 {
-    Write-Verbose "Connecting as $($credential.username)"
-    [string]$rdpusername = $credential.UserName
+    Write-Verbose "Connecting as $theUser"
+    [string]$rdpusername = $theUser
     [string]$rdpdomain = $null
-    if( $credential.UserName.IndexOf( '@' ) -lt 0 )
+    if( $theUser.IndexOf( '@' ) -lt 0 )
     {
-        $rdpdomain,$rdpUsername = $credential.UserName -split '\\'
+        $rdpdomain,$rdpUsername = $theUser -split '\\'
     }
     $rdpCredential = @( "username:s:$rdpusername" , "domain:s:$rdpdomain" )
 }
@@ -1236,6 +1313,7 @@ $WPFShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachin
 $WPFRestartContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Restart'} )
 $WPFSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Snapshots'} )
 $WPFDeleteContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Delete'} )
+$WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
 
 $WPFbtnFilter.Add_Click({
     if( Set-Filters -name $vmName )
