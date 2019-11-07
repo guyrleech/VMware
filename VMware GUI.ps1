@@ -5,7 +5,10 @@
     @guyrleech 04/11/2019  Initial release
     @guyrleech 04/11/2019  Added client drive mapping to rdp file created for credentials and added -extraRDPSettings parameter
     @guyrleech 05/11/2019  Added code to reconnect to VMware if errors with "not connected", e.g. times out. Fixed bug where can't take snapshot or consolidate disks if no snapshots exist. Improved mstsc address detection logic. Fixes when already connected to VMware
-    @guyrleech 06/11/2019  Fixed reconnection code if connection has timed out
+    @guyrleech 06/11/2019  Fixed reconnection code if connection has timed out.
+                           Added Details button to Snapshot window and show date of last revert.
+                           Add functionality to find existing mstsc window & activate unless -noreusemstsc.
+                           Don't pass username via rdp file to mstsc if find saved credential for that connection.
 #>
 
 <#
@@ -59,7 +62,11 @@ Do not attempt to run vmrc.exe when launching the VMware console for a VM
 
 .PARAMETER noRdpFile
 
-DO not create an .rdp file to specify the username for mstsc
+Do not create an .rdp file to specify the username for mstsc
+
+.PARAMETER noReuseMstsc
+
+Always create a new mstsc process otherwise it will find an existing one for that VM and restore the window
 
 .PARAMETER showPoweredOn
 
@@ -126,6 +133,7 @@ Param
     [bool]$showPoweredOff ,
     [bool]$showSuspended ,
     [switch]$showAll ,
+    [switch]$noReuseMstsc ,
     [string]$sortProperty = 'Name' ,
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
@@ -146,6 +154,16 @@ Param
     'Shutdown' = 'Shutdown-VMGuest'
     'Restart' = 'Restart-VMGuest'
 }
+
+$pinvokeCode = @'
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); 
+'@
 
 #region XAML
 
@@ -242,12 +260,16 @@ Param
         Title="Snapshots" Height="450" Width="800">
     <Grid>
         <TreeView x:Name="treeSnapshots" HorizontalAlignment="Left" Height="246" Margin="85,74,0,0" VerticalAlignment="Top" Width="471"/>
-        <Button x:Name="btnTakeSnapshot" Content="Take Snapshot" HorizontalAlignment="Left" Margin="597,88,0,0" VerticalAlignment="Top" Width="92"/>
-        <Button x:Name="btnDeleteSnapshot" Content="Delete" HorizontalAlignment="Left" Margin="597,280,0,0" VerticalAlignment="Top" Width="92"/>
+        <Grid Margin="593,88,85,128" >
+            <Button x:Name="btnTakeSnapshot" Content="Take Snapshot" HorizontalAlignment="Left" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDeleteSnapshot" Content="Delete" HorizontalAlignment="Left" Margin="0,176,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnRevertSnapshot" Content="Revert" HorizontalAlignment="Left" Margin="0,83,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnConsolidateSnapshot" Content="Consolidate" HorizontalAlignment="Left" Margin="0,129,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDetailsSnapshot" Content="Details" HorizontalAlignment="Left" Margin="0,42,0,0" VerticalAlignment="Top" Width="92"/>
+        </Grid>
         <Button x:Name="btnSnapshotsOk" Content="OK" HorizontalAlignment="Left" Margin="95,365,0,0" VerticalAlignment="Top" Width="75" IsDefault="True"/>
         <Button x:Name="btnSnapshotsCancel" Content="Cancel" HorizontalAlignment="Left" Margin="198,365,0,0" VerticalAlignment="Top" Width="75" IsCancel="True"/>
-        <Button x:Name="btnRevertSnapshot" Content="Revert" HorizontalAlignment="Left" Margin="597,148,0,0" VerticalAlignment="Top" Width="92"/>
-        <Button x:Name="btnConsolidateSnapshot" Content="Consolidate" HorizontalAlignment="Left" Margin="597,208,0,0" VerticalAlignment="Top" Width="92"/>
+        <Label x:Name="lblLastRevert" Content="Last Revert" HorizontalAlignment="Left" Height="29" Margin="85,23,0,0" VerticalAlignment="Top" Width="622"/>
     </Grid>
 </Window>
 '@
@@ -485,6 +507,27 @@ Function Process-Snapshot
             }
         }
     }
+    elseif( $Operation -eq 'DetailsSnapshot' )
+    {
+        $VM = Get-VM -Id $VMId
+        if( $VM )
+        {
+            $snapshot = Get-Snapshot -Id $GUIobject.SelectedItem.Tag -VM $vm
+            if( $snapshot )
+            {
+                [string]$details = "Name = $($snapshot.Name)`n`rDescription = $($snapshot.Description)`n`rCreated = $(Get-Date -Date $snapshot.Created -Format G)`n`rSize = $([math]::Round( $snapshot.SizeGB , 2 ))GB`n`rPower State = $($snapshot.PowerState)`n`rQuiesced = $(if( $snapshot.Quiesced ) { 'Yes' } else {'No' })"
+                [void][Windows.MessageBox]::Show( $details , 'Snapshot Details' , 'Ok' ,'Information' )
+            }
+            else
+            {
+                Write-Warning "Unable to get snapshot $($GUIobject.SelectedItem.Tag) for `"$($VM.Name)`""
+            }
+        }
+        else
+        {
+            Write-Warning "Unable to get vm for vm id $vmid"
+        }
+    }
     elseif( $GUIobject.SelectedItem -and $GUIobject.SelectedItem.Tag -and $GUIobject.SelectedItem.Tag -ne 'YouAreHere' )
     {
         [string]$answer = 'yes'
@@ -608,12 +651,26 @@ Function Show-SnapShotWindow
             $snapshotsForm.DialogResult = $false 
             $snapshotsForm.Close() })
 
+        ## get last revert operation
+        $lastRevert = Get-VIEvent -Entity $vm.Name -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties[ 'EventTypeId' ] -and $_.EventTypeId -eq 'com.vmware.vc.vm.VmStateRevertedToSnapshot' -and $_.FullFormattedMessage -match 'has been reverted to the state of snapshot (.*), with ID \d' } | Select-Object -First 1
+        [string]$text = $null
+        if( $lastRevert )
+        {
+            $text = "Last revert was to snapshot `"$($Matches[1])`" on $(Get-Date -Date $lastRevert.CreatedTime -Format G)"
+        }
+        else
+        {
+            $text = "No snapshot revert event found"
+        }
+        $wpflblLastRevert.Content = $text
+
         ## see if consolidation is required so that we enable/disable the consolidation button
         $wpfbtnConsolidateSnapshot.IsEnabled = $vm.Extensiondata.Runtime.ConsolidationNeeded
                         
         $WPFbtnTakeSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'TakeSnapShot' -VMId $vm.Id } )
         $WPFbtnDeleteSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DeleteSnapShot' -VMId $vm.Id} )
         $WPFbtnRevertSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'RevertSnapShot' -VMId $vm.Id} )
+        $WPFbtnDetailsSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DetailsSnapShot' -VMId $vm.Id} )
         $WPFbtnConsolidateSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'ConsolidateSnapShot' -VMId $vm.Id } )
 
         $result = $snapshotsForm.ShowDialog()
@@ -660,6 +717,7 @@ Function Process-Action
                 }
                 ## See if we can resolve its name otherwise we will try its IP addresses
                 [string]$address = $null
+
                 if( $vm.PSObject.Properties[ 'Guest' ] -and $vm.guest )
                 {
                     $address = $vm.guest.HostName
@@ -689,13 +747,48 @@ Function Process-Action
         
                 if( $address )
                 {
-                    Write-Verbose "Launching mstsc to $address"
-                    [string]$arguments = "$rdpFileName /v:$($address):$rdpPort"
-                    if( ! [string]::IsNullOrEmpty( $mstscParams ))
+                    [bool]$setForegroundWindow = $false
+                    if( ! $noReuseMstsc )
                     {
-                        $arguments += " $mstscParams"
+                        ## see if we have a running mstsc for this host already so we can restore and bring to foreground
+                        $mstscProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'mstsc.exe' and ParentProcessId = '$pid'" | Where-Object { $_.CommandLine -match "/v:$address\b" } | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
+                        if( $mstscProcess )
+                        {
+                            Write-Verbose "Found existing mstsc process pid $($mstscProcess.ProcessId) for $address"
+                            $windowHandle = Get-Process -Id $mstscProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle
+                            if( $windowHandle )
+                            {
+                                [bool]$setForegroundWindow = [win32.user32]::ShowWindowAsync( $windowHandle , 9 ) ## restore
+                                if( ! $setForegroundWindow )
+                                {
+                                    Write-Warning "Failed to set mstsc.exe process id $($mstsc.ProcessId) window to foreground"
+                                }
+                            }
+                        }
                     }
-                    $mstscProcess = Start-Process -FilePath 'mstsc.exe' -ArgumentList $arguments -PassThru
+
+                    if( ! $setForegroundWindow )
+                    {
+                        ## See if we have a stored credential for this and if so only create .rdp file if extraRDPSettings set
+                        [string]$storedCredential = cmdkey.exe /list:TERMSRV/$address | Where-Object { $_ -match 'User:' }
+                        [string]$thisRdpFileName = $rdpFileName
+                        if( $storedCredential )
+                        {
+                            Write-Verbose "Got stored credential `"$storedCredential`" for $address"
+                            $thisRdpFileName = $rdpExtrasFileName
+                        }
+                        Write-Verbose "Launching mstsc to $address"
+                        [string]$arguments = "$thisRdpFileName /v:$($address):$rdpPort"
+                        if( ! [string]::IsNullOrEmpty( $mstscParams ))
+                        {
+                            $arguments += " $mstscParams"
+                        }
+                        $mstscProcess = Start-Process -FilePath 'mstsc.exe' -ArgumentList $arguments -PassThru
+                        if( ! $mstscProcess )
+                        {
+                            Write-Error -Message "Failed to run mstsc.exe"
+                        }
+                    }
                 }
                 else
                 {
@@ -893,6 +986,8 @@ Get-Variable -Name WPF*|Select-Object -ExpandProperty Name | Write-Debug
 
 [bool]$alreadyConnected = $false
 
+Add-Type -MemberDefinition $pinvokeCode -Name 'User32' -Namespace 'Win32' -UsingNamespace System.Text -Debug:$false
+
 ## see if already connected and if so if it is the server we are told to connect to
 if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyContinue )
 {
@@ -1059,6 +1154,8 @@ elseif( $passThru )
 }
 
 [string]$rdpFileName = $null
+[string]$rdpExtrasFileName = $null ## use this when find we have a stored credential so don't need username in .rdp but still need to pass extra settings
+
 if( ! $noRdpFile )
 {
     if( $rdpCredential -and $rdpCredential.Count )
@@ -1067,6 +1164,12 @@ if( ! $noRdpFile )
         $rdpFileName = Join-Path -Path $env:temp -ChildPath "grl.$pid.rdp"
         Write-Verbose "Writing $($rdpUsername -join ' , ') to $rdpFileName"
         $rdpCredential + $extraRDPSettings | Out-File -FilePath $rdpFileName
+    }
+    if( $extraRDPSettings -and $extraRDPSettings.Count )
+    {
+        $rdpExtrasFileName = Join-Path -Path $env:temp -ChildPath "grl.extras.$pid.rdp"
+        Write-Verbose "Writing $($extraRDPSettings -join ' , ') only to $rdpExtrasFileName"
+        $extraRDPSettings | Out-File -FilePath $rdpExtrasFileName
     }
 }
 
@@ -1170,6 +1273,11 @@ $result = $mainForm.ShowDialog()
 if( $rdpFileName )
 {
     Remove-Item -Path $rdpFileName -Force -ErrorAction SilentlyContinue
+}
+
+if( $rdpExtrasFileName )
+{
+    Remove-Item -Path $rdpExtrasFileName -Force -ErrorAction SilentlyContinue
 }
 
 if( ! $alreadyConnected -and $connection )
