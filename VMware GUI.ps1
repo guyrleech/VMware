@@ -12,6 +12,7 @@
     @guyrleech 06/11/2019  Added message if VMware operation fails with "not connected" that should try clicking Refresh
                            Pull username from existing VMware connection
                            Event context menu added
+                           Implemented policies for maximum memory and cpus when reconfiguring
 #>
 
 <#
@@ -272,11 +273,11 @@ $pinvokeCode = @'
     <Grid>
         <TreeView x:Name="treeSnapshots" HorizontalAlignment="Left" Height="246" Margin="85,74,0,0" VerticalAlignment="Top" Width="471"/>
         <Grid Margin="593,88,85,128" >
-            <Button x:Name="btnTakeSnapshot" Content="Take Snapshot" HorizontalAlignment="Left" VerticalAlignment="Top" Width="92"/>
-            <Button x:Name="btnDeleteSnapshot" Content="Delete" HorizontalAlignment="Left" Margin="0,176,0,0" VerticalAlignment="Top" Width="92"/>
-            <Button x:Name="btnRevertSnapshot" Content="Revert" HorizontalAlignment="Left" Margin="0,83,0,0" VerticalAlignment="Top" Width="92"/>
-            <Button x:Name="btnConsolidateSnapshot" Content="Consolidate" HorizontalAlignment="Left" Margin="0,129,0,0" VerticalAlignment="Top" Width="92"/>
-            <Button x:Name="btnDetailsSnapshot" Content="Details" HorizontalAlignment="Left" Margin="0,42,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnTakeSnapshot" Content="_Take Snapshot" HorizontalAlignment="Left" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDeleteSnapshot" Content="De_lete" HorizontalAlignment="Left" Margin="0,176,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnRevertSnapshot" Content="_Revert" HorizontalAlignment="Left" Margin="0,83,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnConsolidateSnapshot" Content="_Consolidate" HorizontalAlignment="Left" Margin="0,129,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDetailsSnapshot" Content="_Details" HorizontalAlignment="Left" Margin="0,42,0,0" VerticalAlignment="Top" Width="92"/>
         </Grid>
         <Button x:Name="btnSnapshotsOk" Content="OK" HorizontalAlignment="Left" Margin="95,365,0,0" VerticalAlignment="Top" Width="75" IsDefault="True"/>
         <Button x:Name="btnSnapshotsCancel" Content="Cancel" HorizontalAlignment="Left" Margin="198,365,0,0" VerticalAlignment="Top" Width="75" IsCancel="True"/>
@@ -604,6 +605,10 @@ Function Process-Snapshot
                 Write-Warning "Unable to get vm for vm id $vmid"
             }
         }
+        else
+        {
+            $closeDialogue = $false
+        }
     }
     else
     {
@@ -722,6 +727,36 @@ Function Show-SnapShotWindow
 
         $result = $snapshotsForm.ShowDialog()
     }
+}
+
+## See if we have HKCU or HKLM policy setting for this
+Function Get-PolicySettings
+{
+    [CmdletBinding()]
+
+    Param
+    (
+        [string]$regKey ,
+        [string]$setting
+    )
+
+    [decimal]$result = -1 ## signifies not set
+
+    [string[]]$policyKeys = @( ($regKey -replace '^HK.*:\\Software\\' , 'HKCU:\Software\Policies\') , ($regKey -replace '^HK.*:\\Software\\' , 'HKLM:\Software\Policies\') )
+    ForEach( $policyKey in $policyKeys )
+    {
+        if( $result -lt 0 -and ( Test-Path -Path $policyKey -PathType Container -ErrorAction SilentlyContinue ) )
+        {
+            $regValue = Get-ItemProperty -Path $policyKey -Name $setting -ErrorAction SilentlyContinue | Select-Object -ExpandProperty $setting -ErrorAction SilentlyContinue
+            if( $regValue )
+            {
+                Write-Verbose "Policy setting for $setting found in $regKey, = $regValue"
+                $result = $regValue
+            }
+        }
+    }
+
+    $result ## return
 }
 
 Function Process-Action
@@ -900,18 +935,34 @@ Function Process-Action
                     }
                     if( $newvCPUS -ne $vm.NumCPU )
                     {
-                        VMware.VimAutomation.Core\Set-VM -VM $vm -NumCpu $newvCPUS -Confirm:$false
-                        if( ! $? )
+                        [int]$maxCPUS = Get-PolicySettings -regKey $regKey -setting maxCPUS
+                        if( $maxCPUS -lt 0 -or $newvCPUS -le $maxCPUS )
                         {
-                            [void][Windows.MessageBox]::Show( "Failed to change vCPUs from $($vm.NumCPU) to $newvCPUS in $($vm.Name)" , 'Reconfiguration Error' , 'Ok' ,'Exclamation' )
+                            VMware.VimAutomation.Core\Set-VM -VM $vm -NumCpu $newvCPUS -Confirm:$false
+                            if( ! $? )
+                            {
+                                [void][Windows.MessageBox]::Show( "Failed to change vCPUs from $($vm.NumCPU) to $newvCPUS in $($vm.Name)" , 'Reconfiguration Error' , 'Ok' ,'Exclamation' )
+                            }
+                        }
+                        else
+                        {
+                            [void][Windows.MessageBox]::Show( "The maximum CPUs allowed is $maxCPUS" , 'Reconfiguration Error' , 'Ok' ,'Exclamation' )
                         }
                     }
                     if( $newMemory -ne $vm.MemoryGB )
                     {
-                        VMware.VimAutomation.Core\Set-VM -VM $vm -MemoryGB $newMemory -Confirm:$false
-                        if( ! $? )
+                        [decimal]$maxMemory = Get-PolicySettings -regKey $regKey -setting maxMemory
+                        if( $maxMemory -lt 0 -or $newMemory -le $maxMemory )
                         {
-                            [void][Windows.MessageBox]::Show( "Failed to change memory from $($vm.MemoryGB)GB to $($newMemory)GB in $($vm.Name)" , 'Reconfiguration Error' , 'Ok' ,'Exclamation' )
+                            VMware.VimAutomation.Core\Set-VM -VM $vm -MemoryGB $newMemory -Confirm:$false
+                            if( ! $? )
+                            {
+                                [void][Windows.MessageBox]::Show( "Failed to change memory from $($vm.MemoryGB)GB to $($newMemory)GB in $($vm.Name)" , 'Reconfiguration Error' , 'Ok' ,'Exclamation' )
+                            }
+                        }
+                        else
+                        {
+                            [void][Windows.MessageBox]::Show( "The maximum memory allowed is $($maxMemory)GB" , 'Reconfiguration Error' , 'Ok' ,'Exclamation' )
                         }
                     }
                     if( $WPFtxtNotes.Text -ne $vm.Notes )
