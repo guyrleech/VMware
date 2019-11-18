@@ -13,6 +13,12 @@
                            Pull username from existing VMware connection
                            Event context menu added
                            Implemented policies for maximum memory and cpus when reconfiguring
+                           Changed -webconsole to -consoleBrowser
+                           Added setting of PowerCLI configuration before connecting
+    @guyrleech 06/11/2019  Improved mstsc working address determination when DNS resolution fails
+    @guyrleech 18/11/2019  Activate existing vmrc.exe console process if already running from this script for the selected VM
+                           Added "Mstsc (new)" option
+                           Changed -webconsole to -consoleBrowser to take path to 32 bit web browser
 #>
 
 <#
@@ -60,9 +66,9 @@ Include IPv6 addresses in the display
 
 Connect to vCenter using the credentials running the script (where windows domain authentication is configured and working in VMware)
 
-.PARAMETER webConsole
+.PARAMETER consoleBrowser
 
-Do not attempt to run vmrc.exe when launching the VMware console for a VM
+Do not attempt to run vmrc.exe when launching the VMware console for a VM but use this browser instead (must be 32 bit)
 
 .PARAMETER noRdpFile
 
@@ -135,7 +141,7 @@ Param
     [switch]$saveCredentials ,
     [switch]$ipv6 ,
     [switch]$passThru ,
-    [switch]$webConsole ,
+    [string]$consoleBrowser ,
     [switch]$noRdpFile ,
     [bool]$showPoweredOn = $true,
     [bool]$showPoweredOff ,
@@ -196,6 +202,7 @@ $pinvokeCode = @'
                 <ContextMenu>
                     <MenuItem Header="Console" x:Name="ConsoleContextMenu" />
                     <MenuItem Header="Mstsc" x:Name="MstscContextMenu" />
+                    <MenuItem Header="Mstsc (New)" x:Name="MstscNewContextMenu" />
                     <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
@@ -225,9 +232,9 @@ $pinvokeCode = @'
     <Grid HorizontalAlignment="Left" Height="300" Margin="18,24,0,0" VerticalAlignment="Top" Width="433">
         <Label Content="VM Name/Pattern" HorizontalAlignment="Left" Margin="58,41,0,0" VerticalAlignment="Top" Width="129"/>
         <TextBox x:Name="txtVMName" HorizontalAlignment="Left" Height="26" Margin="187,45,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="217"/>
-        <CheckBox x:Name="chkPoweredOn" Content="Powered On" HorizontalAlignment="Left" Height="32" Margin="187,94,0,0" VerticalAlignment="Top" Width="217"/>
-        <CheckBox x:Name="chkPoweredOff" Content="Powered Off" HorizontalAlignment="Left" Height="32" Margin="187,131,0,0" VerticalAlignment="Top" Width="217"/>
-        <CheckBox x:Name="chkSuspended" Content="Suspended" HorizontalAlignment="Left" Height="32" Margin="187,163,0,0" VerticalAlignment="Top" Width="217"/>
+        <CheckBox x:Name="chkPoweredOn" Content="Powered _On" HorizontalAlignment="Left" Height="32" Margin="187,94,0,0" VerticalAlignment="Top" Width="217"/>
+        <CheckBox x:Name="chkPoweredOff" Content="Powered O_ff" HorizontalAlignment="Left" Height="32" Margin="187,131,0,0" VerticalAlignment="Top" Width="217"/>
+        <CheckBox x:Name="chkSuspended" Content="_Suspended" HorizontalAlignment="Left" Height="32" Margin="187,163,0,0" VerticalAlignment="Top" Width="217"/>
         <Button x:Name="btnFiltersOk" Content="OK" HorizontalAlignment="Left" Margin="45,245,0,0" VerticalAlignment="Top" Width="75" IsDefault="True"/>
         <Button x:Name="btnFiltersCancel" Content="Cancel" HorizontalAlignment="Left" Margin="148,245,0,0" VerticalAlignment="Top" Width="75" IsCancel="True"/>
     </Grid>
@@ -764,7 +771,8 @@ Function Process-Action
     Param
     (
         $GUIobject , 
-        [string]$Operation
+        [string]$Operation ,
+        $context
     )
 
     $_.Handled = $true
@@ -796,7 +804,7 @@ Function Process-Action
         else
         {
             [string]$address = $null
-            if( $Operation -eq 'mstsc' )
+            if( $Operation -match '^mstsc' )
             {
                 if( $vm.PowerState -ne 'PoweredOn' )
                 {
@@ -817,13 +825,16 @@ Function Process-Action
 
                     $address = $null
                     ## Sort addresses so get 192. addresses before 172. or 10. ones which are more likely to be reachable
-                    $vm.Guest | Select-Object -ExpandProperty IPAddress | Where-Object { $_ -match $script:addressPattern -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notmatch '^169\.254\.' } | Sort-Object -Descending | ForEach-Object `
+                    $vm.Guest | Select-Object -ExpandProperty IPAddress | Where-Object { $_ -match $script:addressPattern -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notmatch '^169\.254\.' } | Sort-Object -Descending |Sort-Object -Descending -Property @{e={($_ -split '\.')[0] -as [int]}} | ForEach-Object `
                     {
-                        Write-Verbose "Testing connectivity to port $rdpPort on $PSItem"
-                        $connection = Test-NetConnection -ComputerName $PSItem -Port $rdpPort -ErrorAction SilentlyContinue
-                        if( $connection -and ! $address )
+                        if( ! $address )
                         {
-                            $address = $PSItem
+                            Write-Verbose "Testing connectivity to port $rdpPort on $PSItem"
+                            $connection = Test-NetConnection -ComputerName $PSItem -Port $rdpPort -ErrorAction SilentlyContinue
+                            if( $connection )
+                            {
+                                $address = $PSItem
+                            }
                         }
                     }
                 }
@@ -836,7 +847,7 @@ Function Process-Action
                 if( $address )
                 {
                     [bool]$setForegroundWindow = $false
-                    if( ! $noReuseMstsc )
+                    if( ! $noReuseMstsc -and $Operation -ne 'MstscNew' )
                     {
                         ## see if we have a running mstsc for this host already so we can restore and bring to foreground
                         $mstscProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'mstsc.exe' and ParentProcessId = '$pid'" | Where-Object { $_.CommandLine -match "/v:$address\b" } | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
@@ -886,15 +897,67 @@ Function Process-Action
             elseif( $Operation -eq 'console' )
             {
                 $vmrcProcess = $null
-                if( $session -and ! $webConsole )
+                if( $session -and ! $consoleBrowser )
                 {
-                    $ticket = $Session.AcquireCloneTicket()
-                    $vmrcProcess = Start-Process -FilePath 'vmrc.exe' -ArgumentList "vmrc://clone:$ticket@$($connection.ToString())/?moid=$($vm.ExtensionData.MoRef.value)" -PassThru -WindowStyle Normal -Verb Open -ErrorAction SilentlyContinue
+                    ## see if we already have a running console process for this VM
+                    $vmrcProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'vmrc.exe' and ParentProcessId = '$pid'" | Where-Object { $_.CommandLine -match "/\?moid=$($vm.ExtensionData.MoRef.value)[^\d]" } | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
+                    if( $vmrcProcess )
+                    {
+                        Write-Verbose "Found existing vmrc process pid $($vmrcProcess.ProcessId) for $address"
+                        $windowHandle = Get-Process -Id $vmrcProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle
+                        if( $windowHandle )
+                        {
+                            [bool]$setForegroundWindow = [win32.user32]::ShowWindowAsync( $windowHandle , 9 ) ## restore
+                            if( ! $setForegroundWindow )
+                            {
+                                Write-Warning "Failed to set vmrc.exe process id $($vmrc.ProcessId) window to foreground"
+                                $vmrcProcess = $null
+                            }
+                        }
+                    }
+                    
+                    if( ! $vmrcProcess )
+                    {
+                        $ticket = $Session.AcquireCloneTicket()
+                        if( ! $ticket -and $Error.Count -and $Error.Exception.Message -match "The session is not authenticated" )
+                        {
+                            $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
+                            if( $session )
+                            {
+                                $ticket = $Session.AcquireCloneTicket()
+                            }
+                            else
+                            {
+                                $connection = Connect-VIServer @connectParameters
+                                $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
+                                if( $session )
+                                {
+                                    $ticket = $Session.AcquireCloneTicket()
+                                }
+                            }
+                        }
+                        $vmrcProcess = Start-Process -FilePath 'vmrc.exe' -ArgumentList "vmrc://clone:$ticket@$($connection.ToString())/?moid=$($vm.ExtensionData.MoRef.value)" -PassThru -WindowStyle Normal -Verb Open -ErrorAction SilentlyContinue
+                    }
                 }
                 ## fallback to PowerCLI console but it doesn't persist connection across power operations
                 if( ! $vmrcProcess )
                 {
-                    Open-VMConsoleWindow -VM $vm
+                    if( ! [string]::IsNullOrEmpty( $consoleBrowser ) )
+                    {
+                        [string]$URL = Open-VMConsoleWindow -VM $vm -UrlOnly
+                        if( ! [string]::IsNullOrEmpty( $URL ) )
+                        {
+                            & $consoleBrowser `"$URL`"
+                        }
+                        else
+                        {
+                            Write-Warning "Failed to get vmrc console URL for $($vm.name)"
+                        }
+                    }
+                    else
+                    {
+                        Open-VMConsoleWindow -VM $vm
+                    }
                 }
             }
             elseif( ( $powerCmdlet = $powerOperation[ $Operation ] ) )
@@ -1247,6 +1310,21 @@ if( ! $alreadyConnected )
         $connectParameters.Add( 'Credential' , $credential )
     }
     
+    [hashtable]$powerCLISettings = @{
+        'ParticipateInCeip' = $false 
+        'InvalidCertificateAction' = 'Ignore'
+        'DisplayDeprecationWarnings' = $false
+        'Confirm' = $false
+        'Scope' = 'Session'
+    }
+
+    if( $PSBoundParameters[ 'consoleBrowser' ] )
+    {
+        $powerCLISettings.Add( 'VMConsoleWindowBrowser' , $consoleBrowser )
+    }
+
+    [void](Set-PowerCLIConfiguration @powerCLISettings )
+
     $connection = Connect-VIServer @connectParameters
 
     if( ! $? -or ! $connection )
@@ -1353,8 +1431,9 @@ $WPFVirtualMachines.CanUserSortColumns = $true
 $WPFVirtualMachines.add_MouseDoubleClick({
     Process-Action -GUIobject $WPFVirtualMachines -Operation $doubleClick
 })
-$WPFConsoleContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Console'} )
+$WPFConsoleContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Console' -Context $_ })
 $WPFMstscContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Mstsc'} )
+$WPFMstscNewContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'MstscNew'} )
 $WPFReconfigureContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Reconfigure'} )
 $WPFPowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'PowerOn'} )
 $WPFPowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'PowerOff'} )
@@ -1388,6 +1467,8 @@ $WPFbtnFilter.Add_Click({
 $WPFbtnRefresh.Add_Click({
     $getError = $null
     $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+    Write-Verbose "Got $($getError.Count) errors"
+    $getError[0].Exception.Message|Write-Verbose
     if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
     {
         $connection = Connect-VIServer @connectParameters
