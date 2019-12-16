@@ -19,6 +19,8 @@
     @guyrleech 18/11/2019  Activate existing vmrc.exe console process if already running from this script for the selected VM
                            Added "Mstsc (new)" option
                            Changed -webconsole to -consoleBrowser to take path to 32 bit web browser
+    @guyrleech 16/12/2019  Added menu option to revert to latest snapshot and option to power on VM after snapshot restore.
+                           Gives snapshot name and date of creation when prompting for snapshot operation
 #>
 
 <#
@@ -204,6 +206,7 @@ $pinvokeCode = @'
                     <MenuItem Header="Mstsc" x:Name="MstscContextMenu" />
                     <MenuItem Header="Mstsc (New)" x:Name="MstscNewContextMenu" />
                     <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
+                    <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
@@ -576,45 +579,67 @@ Function Process-Snapshot
             Write-Warning "Unable to get vm for vm id $vmid"
         }
     }
-    elseif( $GUIobject.SelectedItem -and $GUIobject.SelectedItem.Tag -and $GUIobject.SelectedItem.Tag -ne $youAreHereSnapshot )
+    elseif( ! $GUIobject -or ( $GUIobject.SelectedItem -and $GUIobject.SelectedItem.Tag -and $GUIobject.SelectedItem.Tag -ne $youAreHereSnapshot ) )
     {
-        [string]$answer = 'yes'
-        $answer = [Windows.MessageBox]::Show( "Are you sure you want to $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2') on $($vm.Name)?" , 'Confirm Snapshot Operation' , 'YesNo' ,'Question' )
-        
-        if( $answer -eq 'yes' )
+        $VM = Get-VM -Id $VMId
+        if( $VM )
         {
-            $VM = Get-VM -Id $VMId
-            if( $VM )
+            if( $Operation -eq 'LatestSnapshotRevert' )
+            {
+                $snapshot = Get-Snapshot -VM $vm|Sort-Object -Property Created -Descending|Select-Object -First 1
+                if( ! $snapshot )
+                {
+                    [Windows.MessageBox]::Show( "No snapshots found for $($vm.Name)" , 'Snapshot Revert Error' , 'OK' ,'Error' )
+                    return
+                }
+            }
+            else
             {
                 $snapshot = Get-Snapshot -Id $GUIobject.SelectedItem.Tag -VM $vm
-                if( $snapshot )
+            }
+            if( $snapshot )
+            {
+                [string]$answer = 'yes'
+                $answer = [Windows.MessageBox]::Show( "Snapshot `"$($snapshot.Name)`" on $($vm.Name), taken $(Get-Date -Date $snapshot.Created -Format G)?" , "Confirm $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2')" , 'YesNo' ,'Question' )
+        
+                if( $answer -eq 'yes' )
                 {
                     if( $Operation -eq 'DeleteSnapShot' )
                     {
                         Remove-Snapshot -Snapshot $snapshot -RunAsync -Confirm:$false
                     }
-                    elseif( $Operation -eq 'RevertSnapShot' )
+                    elseif( $Operation -eq 'RevertSnapShot' -or $Operation -eq 'LatestSnapshotRevert' )
                     {
-                        Set-VM -VM $vm -Snapshot $snapshot -RunAsync -Confirm:$false
+                        $answer = $null
+                        if( $snapshot.PowerState -eq 'PoweredOff' )
+                        {
+                            $answer = [Windows.MessageBox]::Show( "Power on after snapshot restored on $($vm.Name)?" , 'Confirm Power Operation' , 'YesNo' ,'Question' )
+                        }
+                        [hashtable]$revertParameters = @{ 'VM' = $vm ; 'Snapshot' = $snapshot ;'Confirm' = $false ; RunAsync = ($answer -ne 'Yes') }
+                        Set-VM @revertParameters
+                        if( $answer -eq 'Yes' )
+                        {
+                            Start-VM -VM $vm -Confirm:$false
+                        }
                     }
                     else
                     {
-                        Write-Warning "Unexpcted snapshot operation $operation"
+                        Write-Warning "Unexpected snapshot operation $operation"
                     }
                 }
                 else
                 {
-                    Write-Warning "Unable to get snapshot $($GUIobject.SelectedItem.Tag) for `"$($VM.Name)`""
+                    $closeDialogue = $false
                 }
             }
             else
             {
-                Write-Warning "Unable to get vm for vm id $vmid"
+                Write-Warning "Unable to get snapshot $($GUIobject.SelectedItem.Tag) for `"$($VM.Name)`""
             }
         }
         else
         {
-            $closeDialogue = $false
+            Write-Warning "Unable to get vm for vm id $vmid"
         }
     }
     else
@@ -622,11 +647,12 @@ Function Process-Snapshot
         $closeDialogue = $false
     }
 
-    if( $closeDialogue )
+    if( $closeDialogue -and (Get-Variable -Name snapshotsForm -ErrorAction SilentlyContinue) -and $snapshotsForm )
     {
         ## Close dialog since needs refreshing
         $snapshotsForm.DialogResult = $true 
         $snapshotsForm.Close()
+        $snapshotsForm = $null
     }
 }
 
@@ -646,6 +672,7 @@ Function Show-SnapShotWindow
     }
 
     $snapshotsForm = Load-GUI -inputXaml $snapshotsXAML
+
     [bool]$result = $false
     if( $snapshotsForm )
     {
@@ -680,7 +707,7 @@ Function Show-SnapShotWindow
                 Add-TreeItem -Name $snapshot.Name -Parent $WPFtreeSnapshots -Tag $snapshot.Id
             }
         }
-
+        
         [string]$currentSnapShotId = $null
         if( $vm.ExtensionData -and $vm.ExtensionData.SnapShot -and $vm.ExtensionData.SnapShot.CurrentSnapshot )
         {
@@ -1038,6 +1065,10 @@ Function Process-Action
             {
                 Show-SnapShotWindow -vm $vm
             }
+            elseif( $Operation -eq 'LatestSnapshotRevert' )
+            {
+                Process-Snapshot -Operation 'LatestSnapshotRevert' -VMId $vm.Id
+            }            
             elseif( $Operation -eq 'Delete' )
             {
                 [string]$answer = [Windows.MessageBox]::Show( "Are you sure you want to delete $($vm.Name)?" , 'Confirm Delete Operation' , 'YesNo' ,'Question' )
@@ -1442,6 +1473,7 @@ $WPFResetContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines 
 $WPFShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Shutdown'} )
 $WPFRestartContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Restart'} )
 $WPFSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Snapshots'} )
+$WPFLatestSnapshotRevertContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'LatestSnapshotRevert'} )
 $WPFDeleteContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Delete'} )
 $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
 
