@@ -21,6 +21,8 @@
                            Changed -webconsole to -consoleBrowser to take path to 32 bit web browser
     @guyrleech 16/12/2019  Added menu option to revert to latest snapshot and option to power on VM after snapshot restore.
                            Gives snapshot name and date of creation when prompting for snapshot operation
+    @guyrleech 23/12/2019  Added -credential parameter
+                           Added folder, hardware version and datastore names to grid view
 #>
 
 <#
@@ -39,6 +41,10 @@ One or more VMware vCenter or ESXi hosts to connect to, separated by commas. Aut
 .PARAMETER username
 
 The username, domain qualified or UPN, to connect to VMware with. Use -passthru to pass through credentials used to run script. Will prompt for credentials if no saved credentials in user's local profile or via New-VICredentialStoreItem
+
+.PARAMETER credential
+
+Credential object for connecting to vCenter/ESXi
 
 .PARAMETER vmName
 
@@ -135,6 +141,7 @@ Param
 (
     [string[]]$server ,
     [string]$username ,
+    [System.Management.Automation.PSCredential]$credential ,
     [string]$vmName = '*' ,
     [int]$rdpPort = 3389 ,
     [string]$mstscParams ,
@@ -1131,7 +1138,8 @@ Function Get-VMs
         [string]$pattern ,
         [bool]$poweredOn = $true ,
         [bool]$poweredOff = $true,
-        [bool]$suspended = $true
+        [bool]$suspended = $true ,
+        [hashtable]$datastores
     )
     
     [hashtable]$params = @{}
@@ -1167,7 +1175,9 @@ Function Get-VMs
                 'Snapshots' = ( $snapshots | Where-Object { $_.VMId -eq $VM.Id } | Measure-Object|Select-Object -ExpandProperty Count)
                 'Started' = $vm.ExtensionData.Runtime.BootTime
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
+                'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
                 'Memory (GB)' = $vm.MemoryGB
+                'HW Version' = $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1'
                 'VMware Tools' = $vm.Guest.ToolsVersion
             }
             Add-Member -InputObject $vm -NotePropertyMembers $additionalProperties
@@ -1266,8 +1276,6 @@ if( ! $alreadyConnected -and ! $server -or ! $server.Count )
     }
 }
 
-$credential = $null
-
 [hashtable]$connectParameters = @{ 'Server' = $server ; 'Force' = $true }
 
 if( ! $alreadyConnected )
@@ -1283,7 +1291,7 @@ if( ! $alreadyConnected )
         }
     }
 
-    if( ! $passThru )
+    if( ! $passThru -and ! $credential )
     {
         [string]$joinedServers = ($server|Sort-Object) -join ','
         [string]$credentialFilter = $(if( ! [string]::IsNullOrEmpty( $username ) ) { "$($username -replace '\\' , ';' ).$joinedServers.crud"  } else { "*.$joinedServers.crud"  })
@@ -1443,15 +1451,21 @@ if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'N
     $connection = Connect-VIServer @connectParameters
 }
 
+[hashtable]$datastores = @{}
+Get-Datastore | ForEach-Object `
+{
+    $datastores.Add( $PSItem.Id , $PSItem.Name )
+}
+
 ## so we can acquire a ticket if required for vmrc remote console (will fail on ESXi)
 $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
 
 $datatable = New-Object -TypeName System.Data.DataTable
 
-[string[]]$displayedFields = @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "Used Space (GB)" )
+[string[]]$displayedFields = @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 [void]$Datatable.Columns.AddRange( $displayedFields )
 
-[array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended
+[array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $datastores
 
 $mainForm.Title += " connected to $($server -join ' , ')"
 
@@ -1500,7 +1514,10 @@ $WPFbtnRefresh.Add_Click({
     $getError = $null
     $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
     Write-Verbose "Got $($getError.Count) errors"
-    $getError[0].Exception.Message|Write-Verbose
+    if( $getError )
+    {
+        $getError[0].Exception.Message|Write-Verbose
+    }
     if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
     {
         $connection = Connect-VIServer @connectParameters
