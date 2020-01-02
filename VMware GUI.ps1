@@ -1123,7 +1123,7 @@ Function Update-Form
     $oldCursor = $form.Cursor
     $form.Cursor = [Windows.Input.Cursors]::Wait
     $datatable.Rows.Clear()
-    $global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended
+    $global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
     $WPFVirtualMachines.Items.Refresh()
     $form.Cursor = $oldCursor
 }
@@ -1451,10 +1451,10 @@ if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'N
     $connection = Connect-VIServer @connectParameters
 }
 
-[hashtable]$datastores = @{}
+[hashtable]$script:datastores = @{}
 Get-Datastore | ForEach-Object `
 {
-    $datastores.Add( $PSItem.Id , $PSItem.Name )
+    $script:datastores.Add( $PSItem.Id , $PSItem.Name )
 }
 
 ## so we can acquire a ticket if required for vmrc remote console (will fail on ESXi)
@@ -1465,7 +1465,7 @@ $datatable = New-Object -TypeName System.Data.DataTable
 [string[]]$displayedFields = @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 [void]$Datatable.Columns.AddRange( $displayedFields )
 
-[array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $datastores
+[array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
 
 $mainForm.Title += " connected to $($server -join ' , ')"
 
@@ -1513,6 +1513,7 @@ $WPFbtnFilter.Add_Click({
 $WPFbtnRefresh.Add_Click({
     $getError = $null
     $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+
     Write-Verbose "Got $($getError.Count) errors"
     if( $getError )
     {
@@ -1523,6 +1524,10 @@ $WPFbtnRefresh.Add_Click({
         $connection = Connect-VIServer @connectParameters
         [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
     }
+
+    $script:datastores.Clear()
+    Get-Datastore | ForEach-Object { $script:datastores.Add( $PSItem.Id , $PSItem.Name ) }
+
     Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
     $_.Handled = $true
 })
