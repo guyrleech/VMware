@@ -23,6 +23,7 @@
                            Gives snapshot name and date of creation when prompting for snapshot operation
     @guyrleech 23/12/2019  Added -credential parameter
                            Added folder, hardware version and datastore names to grid view
+    @guyrleech 07/01/2020  Added vMware resource usage to grid view
 #>
 
 <#
@@ -156,6 +157,8 @@ Param
     [bool]$showPoweredOff ,
     [bool]$showSuspended ,
     [switch]$showAll ,
+    [int]$lastSeconds = 300 ,
+    [string]$exclude = 'uptime' ,
     [switch]$noReuseMstsc ,
     [int]$maxEvents = 10000 ,
     [string]$sortProperty = 'Name' ,
@@ -426,6 +429,61 @@ Function Set-Configuration
 #endregion XAML
 
 #region Functions
+
+Function Process-Stats
+{
+    Param
+    (
+        $stats ,
+        [int]$lastSeconds ,
+        [switch]$averageOnly ,
+        [AllowNull()]
+        [string]$exclude
+    )
+    
+    [int]$minimum = [int]::MaxValue
+    [int]$maximum = 0 
+    [int]$average = 0 
+    [long]$total = 0
+    [long]$count = 0
+    [string]$unit = $null
+
+    If( ! $exclude -or $stats.Name -notmatch $exclude )
+    {
+        [datetime]$startTime = (Get-Date).AddSeconds( -$lastSeconds )
+        ForEach( $stat in $stats.Group )
+        {
+           If( $stat.Timestamp -ge $startTime -and [string]::IsNullOrEmpty( $stat.Instance ) ) ## not getting resource specific info, e.g. each CPU
+           {
+                $count++
+                If( $stat.Value -lt $minimum )
+                {
+                    $minimum = $stat.Value
+                }
+                If( $stat.Value -gt $maximum )
+                {
+                    $maximum = $stat.Value
+                }
+                If( ! $unit -and $stat.PSObject.Properties[ 'unit' ] )
+                {
+                    $unit = $stat.Unit
+                }
+                $total += $stat.Value
+           }
+        }
+        [string]$label = (Get-Culture).TextInfo.ToTitleCase( ( $stats.Name -replace '\.([a-z])' , ' $1'))
+        $result = [hashtable]@{ "$label$(If(! $averageOnly ){ ' Average'})" = [int]( $total / $count ) }
+        If( ! $averageOnly )
+        {
+            $result += @{
+                "$label Minimum" = $minimum
+                "$label Maximum" = $maximum
+            }
+        }
+        $result
+    }
+}
+
 Function Find-TreeItem
 {
     Param
@@ -1177,8 +1235,19 @@ Function Get-VMs
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
                 'Memory (GB)' = $vm.MemoryGB
+                'Guest OS' = $(If( $vm.Guest -and $vm.Guest.OSFullName ) { $vm.Guest.OSFullName } Else { $vm.GuestId })
                 'HW Version' = $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1'
                 'VMware Tools' = $vm.Guest.ToolsVersion
+            }
+            if( $lastSeconds -gt 0 )
+            {
+                Get-Stat -Entity $vm -Common -Realtime | Group-Object -Property MetricId | ForEach-Object `
+                {
+                    if( $stats = (Process-Stats -stats $_ -lastSeconds $lastSeconds -exclude $exclude -averageOnly) )
+                    {
+                        $additionalProperties += $stats
+                    }
+                }
             }
             Add-Member -InputObject $vm -NotePropertyMembers $additionalProperties
             $vm
@@ -1263,7 +1332,7 @@ if( ! $PSBoundParameters[ 'mstscParams' ] )
     $mstscParams = Get-ItemProperty -Path $regKey -Name 'mstscParams' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty 'mstscParams'
 }
 
-if( ! $alreadyConnected -and ! $server -or ! $server.Count )
+if( ! $alreadyConnected -and ( ! $server -or ! $server.Count ) )
 {
     ## See if we already have a connection
     if( $global:DefaultVIServers -and $global:DefaultVIServers.Count )
@@ -1462,8 +1531,26 @@ $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
 
 $datatable = New-Object -TypeName System.Data.DataTable
 
-[string[]]$displayedFields = @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
-[void]$Datatable.Columns.AddRange( $displayedFields )
+##[string[]]$displayedFields =  @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
+$displayedFields = New-Object -TypeName System.Collections.Generic.List[String] 
+$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
+If( $lastSeconds -gt 0 )
+{
+    $displayedFields += @( 'Mem Usage Average','Cpu Usagemhz Average','Net Usage Average','Cpu Usage Average','Disk Usage Average' )
+}
+
+## need to ensure numeric columns are of that type so can sort on them
+ForEach( $field in $displayedFields )
+{
+    $type = $(Switch -Regex ( $field )
+    {
+        'vCPUS|Memory|Snapshots|HW|Used|Average' { 'int' }
+        'Started' { 'datetime' }
+        default { 'string' }
+    })
+
+    [void]$Datatable.Columns.Add( $field , ( $type -as [type] ) )
+}
 
 [array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
 
