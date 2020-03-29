@@ -1,4 +1,5 @@
 ﻿#requires -version 3
+
 <#
     Modification History:
 
@@ -24,6 +25,8 @@
     @guyrleech 23/12/2019  Added -credential parameter
                            Added folder, hardware version and datastore names to grid view
     @guyrleech 07/01/2020  Added vMware resource usage to grid view
+    @guyrleech 08/01/2020  Added F5 keyboard handler
+    @guyrleech 29/03/2020  Added check box and parameter for performance data display. Backup function added. Hosts display added.
 #>
 
 <#
@@ -47,9 +50,17 @@ The username, domain qualified or UPN, to connect to VMware with. Use -passthru 
 
 Credential object for connecting to vCenter/ESXi
 
+.PARAMETER backupSnapshotName
+
+The name of the snapshot taken when performing a backup 
+
 .PARAMETER vmName
 
 The name of a VM or pattern to include in the GUI
+
+.PARAMETER performanceData
+
+Enable fetching and displaying of per-VM performance data. Can be changed via a toggle within the UI too
 
 .PARAMETER rdpPort
 
@@ -146,7 +157,7 @@ Param
     [string]$vmName = '*' ,
     [int]$rdpPort = 3389 ,
     [string]$mstscParams ,
-    [ValidateSet('mstsc','console','PowerOn','reconfigure','snapshots','Delete')]
+    [ValidateSet('mstsc','console','PowerOn','reconfigure','snapshots','Delete','backup')]
     [string]$doubleClick = 'mstsc',
     [switch]$saveCredentials ,
     [switch]$ipv6 ,
@@ -157,6 +168,8 @@ Param
     [bool]$showPoweredOff ,
     [bool]$showSuspended ,
     [switch]$showAll ,
+    [switch]$performanceData ,
+    [string]$backupSnapshotName = 'For Backup Taking via Script' ,
     [int]$lastSeconds = 300 ,
     [string]$exclude = 'uptime' ,
     [switch]$noReuseMstsc ,
@@ -164,7 +177,7 @@ Param
     [string]$sortProperty = 'Name' ,
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
-    [string]$vmwareModule = 'VMware.PowerCLI'
+    [string]$vmwareModule = 'VMware.VimAutomation.Core'
 )
 
 [hashtable]$powerstate = @{
@@ -195,7 +208,6 @@ $pinvokeCode = @'
 [string]$youAreHereSnapshot = 'YouAreHere' 
 
 #region XAML
-
 [string]$mainwindowXAML = @'
 <Window x:Class="VMWare_GUI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -205,10 +217,12 @@ $pinvokeCode = @'
         xmlns:local="clr-namespace:VMWare_GUI"
         mc:Ignorable="d"
         Title="Simple VMware Console (SVC) by @guyrleech" Height="500" Width="1000">
-    <DockPanel Margin="10,10,10,10">
-        <Button x:Name="btnConnect" Content="_Connect" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
+    <DockPanel Margin="10,10,-70,2" HorizontalAlignment="Left" >
+        <Button x:Name="btnHosts" Content="_Hosts" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
         <Button x:Name="btnFilter" Content="_Filter" HorizontalAlignment="Left" Height="35" Margin="247,0,0,-35" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
         <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="35" Margin="500,0,0,-35" Width="145" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
+        <Button x:Name="btnDatastores" Content="_Datastores" HorizontalAlignment="Left" Height="35" Margin="690,0,0,-35" Width="145" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
+        <CheckBox x:Name="chkPerfData" Content="_Performance Data" HorizontalAlignment="Left" Height="35" Margin="850,0,0,-35" Width="150" VerticalAlignment="Bottom" DockPanel.Dock="Bottom"/>
         <DataGrid HorizontalAlignment="Stretch" VerticalAlignment="Top" x:Name="VirtualMachines" >
             <DataGrid.ContextMenu>
                 <ContextMenu>
@@ -219,6 +233,7 @@ $pinvokeCode = @'
                     <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
+                    <MenuItem Header="Backup" x:Name="BackupContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
                     <MenuItem Header="Power" x:Name="PowerContextMenu">
                         <MenuItem Header="Power On" x:Name="PowerOnContextMenu" />
@@ -232,6 +247,97 @@ $pinvokeCode = @'
             </DataGrid.ContextMenu>
         </DataGrid>
     </DockPanel>
+</Window>
+'@
+
+[string]$hostsXAML = @'
+<Window x:Class="VMWare_GUI.Hosts"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Hosts" Height="450" Width="800">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition />
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DataGrid Name="HostList">
+            <DataGrid.Columns>
+                <DataGridTextColumn Binding="{Binding Name}" Header="Name"/>
+                <DataGridTextColumn Binding="{Binding Parent}" Header="Parent"/>
+                <DataGridTextColumn Binding="{Binding PowerState}" Header="Power State"/>
+                <DataGridTextColumn Binding="{Binding ConnectionState}" Header="Connection State"/>
+                <DataGridTextColumn Binding="{Binding Manufacturer}" Header="Manufacturer"/>
+                <DataGridTextColumn Binding="{Binding Model}" Header="Model"/>
+                <DataGridTextColumn Binding="{Binding Version}" Header="Version"/>
+                <DataGridTextColumn Binding="{Binding Build}" Header="Build"/>
+                <DataGridTextColumn Binding="{Binding RunningVMs}" Header="Running VMs"/>
+                <DataGridTextColumn Binding="{Binding MemoryTotalGB}" Header="Memory Total (GB)"/>
+                <DataGridTextColumn Binding="{Binding MemoryUsageGB}" Header="Memory Used (GB)"/>
+                <DataGridTextColumn Binding="{Binding MemoryUsedPercent}" Header="Memory Used %"/>
+                <DataGridTextColumn Binding="{Binding NumCPU}" Header="CPUs"/>
+                <DataGridTextColumn Binding="{Binding CPUUsedPercent}" Header="CPU Used %"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</Window>
+'@
+
+[string]$datastoresXAML = @'
+<Window x:Class="VMWare_GUI.Datastores"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Datastores" Height="450" Width="800">
+    <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition />
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <DataGrid Name="DatastoreList">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Binding="{Binding Name}" Header="Name"/>
+                    <DataGridTextColumn Binding="{Binding FreeSpaceGB}" Header="Free Space (GB)"/>
+                    <DataGridTextColumn Binding="{Binding CapacityGB}" Header="Capacity (GB)"/>
+                    <DataGridTextColumn Binding="{Binding UsedPercent}" Header="Used %"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Grid>
+</Window>
+'@
+
+[string]$backupXAML = @'
+<Window x:Class="VMWare_GUI.Backup"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Backup" Height="402.918" Width="465.895">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="333*"/>
+            <ColumnDefinition Width="68*"/>
+        </Grid.ColumnDefinitions>
+        <ComboBox x:Name="comboDatastore" HorizontalAlignment="Left" Height="30" Margin="159,56,0,0" VerticalAlignment="Top" Width="255" Grid.ColumnSpan="2"/>
+        <Label HorizontalAlignment="Left" Margin="39,59,0,0" VerticalAlignment="Top"/>
+        <ComboBox x:Name="comboFolder" HorizontalAlignment="Left" Margin="159,120,0,0" VerticalAlignment="Top" Width="255" Height="30" Grid.ColumnSpan="2"/>
+        <Label Content="Folder" HorizontalAlignment="Left" Height="32" Margin="23,120,0,0" VerticalAlignment="Top" Width="80"/>
+        <Label Content="Datastore" HorizontalAlignment="Left" Height="30" Margin="23,56,0,0" VerticalAlignment="Top" Width="79"/>
+        <CheckBox x:Name="chkAsync" Content="_Asynchronous " HorizontalAlignment="Left" Height="24" Margin="159,235,0,0" VerticalAlignment="Top" Width="161"/>
+        <Button x:Name="btnBackupOK" Content="OK" HorizontalAlignment="Left" Height="35" Margin="23,298,0,0" VerticalAlignment="Top" Width="110" IsDefault="True"/>
+        <Button x:Name="btnBackupCancel" Content="Cancel" HorizontalAlignment="Left" Height="35" Margin="195,298,0,0" VerticalAlignment="Top" Width="110" IsCancel="True"/>
+        <TextBox x:Name="txtBackupName" HorizontalAlignment="Left" Height="30" Margin="159,178,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="255" Grid.ColumnSpan="2"/>
+        <Label Content="Backup VM Name" HorizontalAlignment="Left" Height="30" Margin="23,178,0,0" VerticalAlignment="Top" Width="131"/>
+
+    </Grid>
 </Window>
 '@
 
@@ -328,6 +434,28 @@ $pinvokeCode = @'
     </Grid>
 </Window>
 '@
+
+Function Refresh-Form
+{
+    $getError = $null
+    $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+
+    Write-Verbose "Got $($getError.Count) errors"
+    if( $getError )
+    {
+        $getError[0].Exception.Message|Write-Verbose
+    }
+    if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+    {
+        $connection = Connect-VIServer @connectParameters
+        [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+    }
+
+    $script:datastores.Clear()
+    Get-Datastore | ForEach-Object { $script:datastores.Add( $PSItem.Id , $PSItem.Name ) }
+
+    Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
+}
 
 Function Load-GUI
 {
@@ -721,6 +849,68 @@ Function Process-Snapshot
     }
 }
 
+Function Show-DatastoresWindow
+{
+    $datastoresForm = Load-GUI -inputXaml $datastoresXAML
+
+    if( $datastoresForm )
+    {
+        [array]$datastores = @( Get-Datastore | ForEach-Object `
+        {
+            $datastore = $_
+            
+            [pscustomobject][ordered]@{
+                'Name' = $datastore.Name
+                'FreeSpaceGB' = [math]::Round( $datastore.FreeSpaceGB , 1 )
+                'CapacityGB' = [math]::Round( $datastore.CapacityGB , 1 )
+                'UsedPercent' = [math]::Round( ($datastore.CapacityGB - $datastore.FreeSpaceGB ) / $datastore.CapacityGB * 100 , 1 )
+            }
+        })
+        $datastoresForm.Title =  "$($datastores.Count) datastores"
+        $WPFDatastoreList.ItemsSource = $datastores
+        $WPFDatastoreList.IsReadOnly = $true
+        $WPFDatastoreList.CanUserSortColumns = $true
+        $datastoresForm.ShowDialog()
+    }
+}
+
+
+Function Show-HostsWindow
+{
+    $hostsForm = Load-GUI -inputXaml $hostsXAML
+
+    if( $hostsForm )
+    {
+        [hashtable]$VMsByHost = Get-VM | Where-Object PowerState -eq 'PoweredOn' | Group-Object -Property VMHost -AsHashTable -AsString
+        Get-VMHost| ForEach-Object `
+        {
+            $thisHost = $_
+           
+            $WPFhostList.Items.Add( [pscustomobject][ordered]@{
+                'Name' = $thisHost.Name
+                'Parent' = $thisHost.Parent
+                'PowerState' = $thisHost.PowerState
+                'ConnectionState' = $thisHost.ConnectionState
+                'Manufacturer' = $thisHost.Manufacturer
+                'Model' = $thisHost.Model
+                'Version' = $thisHost.Version
+                'Build' = $thisHost.Build
+                'MemoryTotalGB' = [math]::Round( $thisHost.MemoryTotalGB , 1 )
+                'MemoryUsageGB' = [math]::Round( $thisHost.MemoryUsageGB , 1 )
+                'NumCPU' = $thisHost.NumCPU
+                'RunningVMs' = $(if( $VMsByHost[ $thisHost.name ] ) { $VMsByHost[ $thisHost.name ].Count } else { [int]0 })
+                'MemoryUsedPercent' = [math]::Round( $thisHost.MemoryUsageGB / $thisHost.MemoryTotalGB * 100 , 1 )
+                'CPUUsedPercent' = [math]::Round( $thisHost.CpuUsageMhz / $thisHost.CpuTotalMhz * 100 , 1 )
+            } )
+        }
+        $hostsForm.Title =  "$($WPFhostList.Items.Count) hosts"
+        $WPFhostList.IsReadOnly = $true
+        $WPFhostList.CanUserSortColumns = $true
+        $hostsForm.ShowDialog()
+    }
+}
+
+
 Function Show-SnapShotWindow
 {
     [CmdletBinding()]
@@ -749,7 +939,7 @@ Function Show-SnapShotWindow
             if( $snapshot.ParentSnapshotId )
             {
                 ## find where to add our node
-                $parent = $theseSnapshots | Where-Object { $_.Id -eq $snapshot.ParentSnapshotId }
+                $parent = $theseSnapshots | Where-Object Id -eq $snapshot.ParentSnapshotId
                 if( $parent )
                 {
                     $parentNode = Find-TreeItem -control $WPFtreeSnapshots -tag $snapshot.ParentSnapshotId
@@ -896,7 +1086,101 @@ Function Process-Action
         else
         {
             [string]$address = $null
-            if( $Operation -match '^mstsc' )
+            if( $operation -eq 'backup' )
+            {
+                ## http://www.simonlong.co.uk/blog/2010/05/05/powercli-a-simple-vm-backup-script/
+                
+                $backupForm = Load-GUI -inputXaml $backupXAML
+
+                if( $backupForm )
+                {
+                    $backupForm.Title += " of $($vm.Name)"
+                    $wpftxtBackupName.Text = "Backup $($vm.Name) $((Get-Date -Format d) -replace '/')"
+
+                    $wpfcomboDatastore.Items.Clear()
+                    Get-Datastore | Sort-Object -Property Name | ForEach-Object `
+                    {
+                        $wpfcomboDatastore.Items.Add( $_.Name )
+                    }
+                    
+                    $wpfcomboFolder.Items.Clear()
+                    Get-Folder | Sort-Object -Property Name | ForEach-Object `
+                    {
+                        $wpfcomboFolder.Items.Add( $_.Name )
+                    }
+                    
+                    $WPFbtnBackupOK.Add_Click({
+                        if( ! $wpfcomboDatastore.SelectedItem )
+                        {
+                            [void][Windows.MessageBox]::Show( "Must select the destination datastore for the backup" , 'Backup Error' , 'Ok' ,'Error' )
+                        }
+                        elseif( ! $wpfcomboFolder.SelectedItem )
+                        {
+                            [void][Windows.MessageBox]::Show( "Must select the destination folder for the backup" , 'Backup Error' , 'Ok' ,'Error' )
+                        }
+                        elseif( [string]::IsNullOrEmpty( $wpftxtBackupName.Text ) )
+                        {
+                            [void][Windows.MessageBox]::Show( "Must enter a name for the backup VM" , 'Backup Error' , 'Ok' ,'Error' )
+                        }
+                        else
+                        {
+                            $backupForm.DialogResult = $true 
+                            $backupForm.Close()  }
+                        })
+
+                    $result = $backupForm.ShowDialog()
+
+                    if( $result )
+                    {
+                        if( $cloneSnapshot = New-Snapshot -VM $vm -Name ( [System.Environment]::ExpandEnvironmentVariables( $backupSnapshotName ) ) )
+                        {
+                            $vmView = $vm | Get-View
+                            $cloneSpec = New-Object -Typename Vmware.Vim.VirtualMachineCloneSpec
+                            $cloneSpec.Snapshot = $vmView.Snapshot.CurrentSnapshot
+ 
+                            # Make linked disk specification
+                            $cloneSpec.Location = New-Object -Typename Vmware.Vim.VirtualMachineRelocateSpec
+                            $cloneSpec.Location.Datastore = (Get-Datastore -Name $wpfcomboDatastore.SelectedItem | Get-View).MoRef
+                            $cloneSpec.Location.Transform =  [Vmware.Vim.VirtualMachineRelocateTransformation]::sparse
+ 
+                            $cloneName = $wpftxtBackupName.Text
+ 
+                            $cloneFolder = (Get-Folder -Name $wpfcomboFolder.SelectedItem | Get-View).Moref
+
+                            if( $backupTask = $vmView.CloneVM_Task( $cloneFolder , $cloneName , $cloneSpec ) )
+                            {
+                                if( ! $WPFchkAsync.IsChecked )
+                                {
+                                    $oldCursor = $backupForm.Cursor
+                                    $backupForm.Cursor = [Windows.Input.Cursors]::Wait
+                                    $result = Wait-Task -Task (Get-Task -Id $backupTask)
+                                    $backupForm.Cursor = $oldCursor
+
+                                    if( ! $result )
+                                    {
+                                        [void][Windows.MessageBox]::Show( "Failed waiting for completion of backup of $($vm.Name)" , 'Backup Error' , 'OK' ,'Error' )
+                                    }
+                                    else
+                                    {
+                                        Remove-Snapshot -Snapshot $cloneSnapshot -Confirm:$false
+                                    }
+                                }
+                                ## else async so cannot remove snapshot as in use
+                            }
+                            else
+                            {
+                                [void][Windows.MessageBox]::Show( "Failed to create backup of $($vm.Name)" , 'Backup Error' , 'OK' ,'Error' )
+                                Remove-Snapshot -Snapshot $cloneSnapshot -Confirm:$false
+                            }
+                        }
+                        else
+                        {
+                            [void][Windows.MessageBox]::Show( "Failed to create snapshot of $($vm.Name) for backup" , 'Backup Error' , 'OK' ,'Error' )
+                        }
+                    }
+                }
+            }
+            elseif( $Operation -match '^mstsc' )
             {
                 if( $vm.PowerState -ne 'PoweredOn' )
                 {
@@ -922,7 +1206,7 @@ Function Process-Action
                         if( ! $address )
                         {
                             Write-Verbose "Testing connectivity to port $rdpPort on $PSItem"
-                            $connection = Test-NetConnection -ComputerName $PSItem -Port $rdpPort -ErrorAction SilentlyContinue
+                            $connection = Test-NetConnection -ComputerName $PSItem -Port $rdpPort -ErrorAction SilentlyContinue -InformationLevel Quiet
                             if( $connection )
                             {
                                 $address = $PSItem
@@ -942,7 +1226,7 @@ Function Process-Action
                     if( ! $noReuseMstsc -and $Operation -ne 'MstscNew' )
                     {
                         ## see if we have a running mstsc for this host already so we can restore and bring to foreground
-                        $mstscProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'mstsc.exe' and ParentProcessId = '$pid'" | Where-Object { $_.CommandLine -match "/v:$address\b" } | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
+                        $mstscProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'mstsc.exe' and ParentProcessId = '$pid'" | Where-Object CommandLine -match "/v:$address\b" | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
                         if( $mstscProcess )
                         {
                             Write-Verbose "Found existing mstsc process pid $($mstscProcess.ProcessId) for $address"
@@ -992,7 +1276,7 @@ Function Process-Action
                 if( $session -and ! $consoleBrowser )
                 {
                     ## see if we already have a running console process for this VM
-                    $vmrcProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'vmrc.exe' and ParentProcessId = '$pid'" | Where-Object { $_.CommandLine -match "/\?moid=$($vm.ExtensionData.MoRef.value)[^\d]" } | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
+                    $vmrcProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'vmrc.exe' and ParentProcessId = '$pid'" | Where-Object CommandLine -match "/\?moid=$($vm.ExtensionData.MoRef.value)[^\d]" | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
                     if( $vmrcProcess )
                     {
                         Write-Verbose "Found existing vmrc process pid $($vmrcProcess.ProcessId) for $address"
@@ -1010,25 +1294,55 @@ Function Process-Action
                     
                     if( ! $vmrcProcess )
                     {
-                        $ticket = $Session.AcquireCloneTicket()
-                        if( ! $ticket -and $Error.Count -and $Error.Exception.Message -match "The session is not authenticated" )
+                        try
                         {
-                            $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
-                            if( $session )
+                            $ticket = $Session.AcquireCloneTicket()
+                        }
+                        catch
+                        {
+                            $ticket = $null
+                        }
+                        if( ! $ticket )
+                        {
+                            if( $Error.Count -and $Error[0].Exception.Message -match 'The session is not authenticated' )
                             {
-                                $ticket = $Session.AcquireCloneTicket()
-                            }
-                            else
-                            {
-                                $connection = Connect-VIServer @connectParameters
+                                Write-Verbose "Gettting new session for ticket"
                                 $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
                                 if( $session )
                                 {
                                     $ticket = $Session.AcquireCloneTicket()
                                 }
+                                else
+                                {
+                                    $connection = Connect-VIServer @connectParameters
+                                    if( ! $connection )
+                                    {
+                                        Write-Warning "Failed to connect to VI server"
+                                    }
+                                    $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
+                                    if( $session )
+                                    {
+                                        $ticket = $Session.AcquireCloneTicket()
+                                    }
+                                    else
+                                    {
+                                        Write-Warning "Failed to get session"
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                Write-Warning -Message "Failed to acquire ticket: $Error"
                             }
                         }
-                        $vmrcProcess = Start-Process -FilePath 'vmrc.exe' -ArgumentList "vmrc://clone:$ticket@$($connection.ToString())/?moid=$($vm.ExtensionData.MoRef.value)" -PassThru -WindowStyle Normal -Verb Open -ErrorAction SilentlyContinue
+                        If( $ticket -and $connection -and $vm )
+                        {
+                            $vmrcProcess = Start-Process -FilePath 'vmrc.exe' -ArgumentList "vmrc://clone:$ticket@$($connection.ToString())/?moid=$($vm.ExtensionData.MoRef.value)" -PassThru -WindowStyle Normal -Verb Open -ErrorAction SilentlyContinue
+                        }
+                        Else
+                        {
+                            Write-Warning "Unable to launch vmrc.exe - ticket $ticket, connection $connection, vm $vm"
+                        }
                     }
                 }
                 ## fallback to PowerCLI console but it doesn't persist connection across power operations
@@ -1205,7 +1519,7 @@ Function Get-VMs
     {
         $params.Add( 'Name' , $pattern )
     }
-
+     
     [array]$vms = @( VMware.VimAutomation.Core\Get-VM @params | Sort-Object -Property $script:sortProperty | . { Process
     {
         $vm = $PSItem
@@ -1230,7 +1544,7 @@ Function Get-VMs
                 'vCPUs' = $vm.NumCpu
                 'Power State' = $powerState[ $vm.PowerState.ToString() ]
                 'IP Addresses' = $IPaddresses -join ','
-                'Snapshots' = ( $snapshots | Where-Object { $_.VMId -eq $VM.Id } | Measure-Object|Select-Object -ExpandProperty Count)
+                'Snapshots' = ( $snapshots | Where-Object VMId -eq $VM.Id | Measure-Object|Select-Object -ExpandProperty Count)
                 'Started' = $vm.ExtensionData.Runtime.BootTime
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
@@ -1239,9 +1553,11 @@ Function Get-VMs
                 'HW Version' = $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1'
                 'VMware Tools' = $vm.Guest.ToolsVersion
             }
-            if( $lastSeconds -gt 0 )
+
+            if( $lastSeconds -gt 0 -and $WPFchkPerfData.IsChecked -and $vm.PowerState -eq 'PoweredOn' )
             {
-                Get-Stat -Entity $vm -Common -Realtime | Group-Object -Property MetricId | ForEach-Object `
+                ## Doing get-stat for all VMs in one call is no quicker and because can throw exception would potentially mean missing some machines
+                Get-Stat -Entity $vm -Common -Realtime -ErrorAction SilentlyContinue | Group-Object -Property MetricId | ForEach-Object `
                 {
                     if( $stats = (Process-Stats -stats $_ -lastSeconds $lastSeconds -exclude $exclude -averageOnly) )
                     {
@@ -1249,12 +1565,16 @@ Function Get-VMs
                     }
                 }
             }
+  
             Add-Member -InputObject $vm -NotePropertyMembers $additionalProperties
             $vm
             $items = New-Object -TypeName System.Collections.ArrayList
             ForEach( $field in $displayedFields )
             {
-                [void]$items.Add( $vm.$field )
+                if( $vm.PSObject.Properties[ $field ] )
+                {
+                    [void]$items.Add( $vm.$field )
+                }
             }
             [void]$datatable.Rows.Add( [array]$items )
         }
@@ -1552,6 +1872,8 @@ ForEach( $field in $displayedFields )
     [void]$Datatable.Columns.Add( $field , ( $type -as [type] ) )
 }
 
+$WPFchkPerfData.IsChecked = $performanceData
+
 [array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
 
 $mainForm.Title += " connected to $($server -join ' , ')"
@@ -1576,8 +1898,14 @@ $WPFRestartContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachine
 $WPFSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Snapshots'} )
 $WPFLatestSnapshotRevertContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'LatestSnapshotRevert'} )
 $WPFDeleteContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Delete'} )
+$WPFBackupContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Backup'} )
 $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
-
+$WPFbtnDatastores.Add_Click({
+    Show-DatastoresWindow
+})
+$WPFbtnHosts.Add_Click({
+    Show-HostsWindow
+})
 $WPFbtnFilter.Add_Click({
     if( Set-Filters -name $vmName )
     {
@@ -1598,25 +1926,21 @@ $WPFbtnFilter.Add_Click({
 })
 
 $WPFbtnRefresh.Add_Click({
-    $getError = $null
-    $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
-
-    Write-Verbose "Got $($getError.Count) errors"
-    if( $getError )
-    {
-        $getError[0].Exception.Message|Write-Verbose
-    }
-    if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
-    {
-        $connection = Connect-VIServer @connectParameters
-        [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
-    }
-
-    $script:datastores.Clear()
-    Get-Datastore | ForEach-Object { $script:datastores.Add( $PSItem.Id , $PSItem.Name ) }
-
-    Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
+    Refresh-Form
     $_.Handled = $true
+})
+
+$mainForm.add_KeyDown({
+    Param
+    (
+      [Parameter(Mandatory)][Object]$sender,
+      [Parameter(Mandatory)][Windows.Input.KeyEventArgs]$event
+    )
+    if( $event -and $event.Key -eq 'F5' )
+    {
+        $_.Handled = $true
+        Refresh-Form
+    }    
 })
 
 $result = $mainForm.ShowDialog()
