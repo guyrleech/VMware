@@ -27,6 +27,8 @@
     @guyrleech 07/01/2020  Added vMware resource usage to grid view
     @guyrleech 08/01/2020  Added F5 keyboard handler
     @guyrleech 29/03/2020  Added check box and parameter for performance data display. Backup function added. Hosts display added.
+    @guyrleech 20/04/2020  Added date/time connected to title and number of VMs shown
+                           Added snapshot tree removal button & code
 #>
 
 <#
@@ -400,7 +402,7 @@ $pinvokeCode = @'
         <TreeView x:Name="treeSnapshots" HorizontalAlignment="Left" Height="246" Margin="85,74,0,0" VerticalAlignment="Top" Width="471"/>
         <Grid Margin="593,88,85,128" >
             <Button x:Name="btnTakeSnapshot" Content="_Take Snapshot" HorizontalAlignment="Left" VerticalAlignment="Top" Width="92"/>
-            <Button x:Name="btnDeleteSnapshot" Content="De_lete" HorizontalAlignment="Left" Margin="0,176,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDeleteSnapshot" Content="De_lete" HorizontalAlignment="Left" Margin="0,172,0,0" VerticalAlignment="Top" Width="92"/>
             <Button x:Name="btnRevertSnapshot" Content="_Revert" HorizontalAlignment="Left" Margin="0,83,0,0" VerticalAlignment="Top" Width="92"/>
             <Button x:Name="btnConsolidateSnapshot" Content="_Consolidate" HorizontalAlignment="Left" Margin="0,129,0,0" VerticalAlignment="Top" Width="92"/>
             <Button x:Name="btnDetailsSnapshot" Content="_Details" HorizontalAlignment="Left" Margin="0,42,0,0" VerticalAlignment="Top" Width="92"/>
@@ -408,6 +410,7 @@ $pinvokeCode = @'
         <Button x:Name="btnSnapshotsOk" Content="OK" HorizontalAlignment="Left" Margin="95,365,0,0" VerticalAlignment="Top" Width="75" IsDefault="True"/>
         <Button x:Name="btnSnapshotsCancel" Content="Cancel" HorizontalAlignment="Left" Margin="198,365,0,0" VerticalAlignment="Top" Width="75" IsCancel="True"/>
         <Label x:Name="lblLastRevert" Content="Last Revert" HorizontalAlignment="Left" Height="29" Margin="85,23,0,0" VerticalAlignment="Top" Width="622"/>
+        <Button x:Name="btnDeleteSnapShotTree" Content="Delete _Tree" HorizontalAlignment="Left" Margin="593,300,0,0" VerticalAlignment="Top" Width="92"/>
     </Grid>
 </Window>
 '@
@@ -792,14 +795,30 @@ Function Process-Snapshot
             }
             if( $snapshot )
             {
-                [string]$answer = 'yes'
-                $answer = [Windows.MessageBox]::Show( "Snapshot `"$($snapshot.Name)`" on $($vm.Name), taken $(Get-Date -Date $snapshot.Created -Format G)?" , "Confirm $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2')" , 'YesNo' ,'Question' )
+                [string]$answer = 'no'
+                [string]$questionText = $null
+
+                if( $Operation -eq 'DeleteSnapShotTree' )
+                {
+                    $questionText = 'From snapshot'
+                }
+                else
+                {
+                    $questionText = 'Snapshot'
+                }
+
+                $questionText += " `"$($snapshot.Name)`" on $($vm.Name), taken $(Get-Date -Date $snapshot.Created -Format G)?"
+                $answer = [Windows.MessageBox]::Show( $questionText , "Confirm $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2')" , 'YesNo' ,'Question' )
         
                 if( $answer -eq 'yes' )
                 {
                     if( $Operation -eq 'DeleteSnapShot' )
                     {
                         Remove-Snapshot -Snapshot $snapshot -RunAsync -Confirm:$false
+                    }
+                    elseif( $Operation -eq 'DeleteSnapShotTree' )
+                    {
+                        Remove-Snapshot -Snapshot $snapshot -Confirm:$false -RemoveChildren -RunAsync
                     }
                     elseif( $Operation -eq 'RevertSnapShot' -or $Operation -eq 'LatestSnapshotRevert' )
                     {
@@ -1010,6 +1029,7 @@ Function Show-SnapShotWindow
                         
         $WPFbtnTakeSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'TakeSnapShot' -VMId $vm.Id } )
         $WPFbtnDeleteSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DeleteSnapShot' -VMId $vm.Id} )
+        $WPFbtnDeleteSnapShotTree.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DeleteSnapShotTree' -VMId $vm.Id} )
         $WPFbtnRevertSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'RevertSnapShot' -VMId $vm.Id} )
         $WPFbtnDetailsSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DetailsSnapShot' -VMId $vm.Id} )
         $WPFbtnConsolidateSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'ConsolidateSnapShot' -VMId $vm.Id } )
@@ -1496,6 +1516,8 @@ Function Update-Form
     $form.Cursor = [Windows.Input.Cursors]::Wait
     $datatable.Rows.Clear()
     $global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
+    
+    $mainForm.Title = $mainForm.Title -replace 'connected to.*' , "connected to $($server -join ' , ') at $(Get-Date -Format G), $($global:vms.Count) VMs"
     $WPFVirtualMachines.Items.Refresh()
     $form.Cursor = $oldCursor
 }
@@ -1876,7 +1898,7 @@ $WPFchkPerfData.IsChecked = $performanceData
 
 [array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
 
-$mainForm.Title += " connected to $($server -join ' , ')"
+$mainForm.Title += " connected to $($server -join ' , ') at $(Get-Date -Format G), $($global:vms.Count) VMs"
 
 $WPFVirtualMachines.ItemsSource = $datatable.DefaultView
 $WPFVirtualMachines.IsReadOnly = $true
