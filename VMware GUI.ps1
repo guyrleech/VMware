@@ -29,6 +29,7 @@
     @guyrleech 29/03/2020  Added check box and parameter for performance data display. Backup function added. Hosts display added.
     @guyrleech 20/04/2020  Added date/time connected to title and number of VMs shown
                            Added snapshot tree removal button & code
+    @guyrleech 02/05/2020  Added console screenshot feature & -screenshotfolder to persist the image files
 #>
 
 <#
@@ -128,6 +129,10 @@ The maximum number of events to retrieve from VMware
 
 The VM property to sort the display on.
 
+.PARAMETER screenshotFolder
+
+Folder in which to store console screenshot files. Uuser's temp folder is used if not specified and files deleted.
+
 .EXAMPLE
 
 & '.\VMware GUI.ps1' -server grl-vcenter01 -username guy@leech.com -saveCredentials -doubleClick console
@@ -176,6 +181,7 @@ Param
     [string]$exclude = 'uptime' ,
     [switch]$noReuseMstsc ,
     [int]$maxEvents = 10000 ,
+    [string]$screenShotFolder ,
     [string]$sortProperty = 'Name' ,
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
@@ -237,6 +243,7 @@ $pinvokeCode = @'
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
+                    <MenuItem Header="Screenshot" x:Name="ScreenshotContextMenu" />
                     <MenuItem Header="Power" x:Name="PowerContextMenu">
                         <MenuItem Header="Power On" x:Name="PowerOnContextMenu" />
                         <MenuItem Header="Power Off" x:Name="PowerOffContextMenu" />
@@ -249,6 +256,22 @@ $pinvokeCode = @'
             </DataGrid.ContextMenu>
         </DataGrid>
     </DockPanel>
+</Window>
+'@
+
+[string]$screenshotXAML = @'
+<Window x:Class="VMWare_GUI.Screenshot"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Screenshot" Height="700" Width="950">
+    <Grid>
+        <Image x:Name="imgScreenshot" HorizontalAlignment="Left" Height="620" Margin="11,31,0,0" VerticalAlignment="Top" Width="922"/>
+
+    </Grid>
 </Window>
 '@
 
@@ -1460,6 +1483,58 @@ Function Process-Action
                     }
                 }
             }
+            elseif( $Operation -eq 'Screenshot' )
+            {
+                $view = $vm | Get-View
+                $shot = $view.CreateScreenshot()
+                [datetime]$snapshotTime = [datetime]::Now
+                if( $shot )
+                {
+                    $datacenter = Get-DataCenter -VM $vm
+                    [string]$sourceFile = "vmstore:/$($datacenter.name)/$($shot -replace '\[' -replace '\]\s*' , '/')"
+                    if( ! [string]::IsNullOrEmpty( $screenShotFolder ) -and ! ( Test-Path -Path $screenShotFolder -ErrorAction SilentlyContinue -PathType Container ) )
+                    {
+                        $null = New-Item -Path $screenShotFolder -ItemType Directory
+                    }
+                    [string]$localfile = Join-Path -Path $( if( ! [string]::IsNullOrEmpty( $screenShotFolder ) ) { $screenShotFolder } else { $env:temp }) -ChildPath "$(Get-Date -Format 'HHmmss-ddMMyy')-$(Split-Path -Path $shot -Leaf)"
+                    if( ( $copied = Copy-DatastoreItem -Item $sourceFile -Destination $localFile -PassThru ) )
+                    {
+                        if( $screenshotWindow = Load-GUI -inputXaml $screenshotXAML )
+                        {
+                            if( $filestream = New-Object System.IO.FileStream -ArgumentList $copied.FullName , Open , Read )
+                            {
+                                $bitmap = New-Object -Typename System.Windows.Media.Imaging.BitmapImage
+                                $bitmap.BeginInit()
+                                $bitmap.StreamSource = $filestream
+                                $bitmap.EndInit()
+                                $wpfimgScreenshot.Source = $bitmap
+                                $screenshotWindow.Title = "Screenshot of $($vm.Name) at $(Get-Date -Date $snapshotTime)"
+                                $screenshotWindow.ShowDialog()
+                                $bitmap.StreamSource = $null
+                                $filestream.Close()
+                                $filestream = $null
+                                $bitmap = $null
+                            }
+                            else
+                            {
+                                [void][Windows.MessageBox]::Show( "Failed to open screenshot file $($copied.FullName)" , 'Snapshot Error' , 'Ok' ,'Exclamation' )
+                            }
+                        }
+                        if( [string]::IsNullOrEmpty( $screenShotFolder ) )
+                        {
+                            Remove-Item -Path $copied.FullName
+                        }
+                    }
+                    else
+                    {
+                        [void][Windows.MessageBox]::Show( "Failed to copy console snapshot of $($vm.Name) from $sourceFile" , 'Snapshot Error' , 'Ok' ,'Exclamation' )
+                    }
+                }
+                else
+                {
+                    [void][Windows.MessageBox]::Show( "Failed to create console snapshot of $($vm.Name)" , 'Snapshot Error' , 'Ok' ,'Exclamation' )
+                }
+            }
             elseif( $Operation -eq 'Snapshots' )
             {
                 Show-SnapShotWindow -vm $vm
@@ -1920,6 +1995,7 @@ $WPFRestartContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachine
 $WPFSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Snapshots'} )
 $WPFLatestSnapshotRevertContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'LatestSnapshotRevert'} )
 $WPFDeleteContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Delete'} )
+$WPFScreenshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Screenshot'} )
 $WPFBackupContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Backup'} )
 $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
 $WPFbtnDatastores.Add_Click({
