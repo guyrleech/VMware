@@ -30,6 +30,8 @@
     @guyrleech 20/04/2020  Added date/time connected to title and number of VMs shown
                            Added snapshot tree removal button & code
     @guyrleech 02/05/2020  Added console screenshot feature & -screenshotfolder to persist the image files
+    @guyrleech 07/05/2020  Message box shown for snapshot consolidation to confirm task started
+    @guyrleech 09/05/2020  Added CD mounting/unmounting facility and upgrading VMware tools
 #>
 
 <#
@@ -214,6 +216,7 @@ $pinvokeCode = @'
 '@
 
 [string]$youAreHereSnapshot = 'YouAreHere' 
+[string]$global:lastDatastoreFolder = $null
 
 #region XAML
 [string]$mainwindowXAML = @'
@@ -242,6 +245,11 @@ $pinvokeCode = @'
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
+                    <MenuItem Header="CD" x:Name="CDContextMenu" >
+                        <MenuItem Header="Mount" x:Name="CDConnectContextMenu" />
+                        <MenuItem Header="Eject" x:Name="CDDisconnectContextMenu" />
+                    </MenuItem>
+                    <MenuItem Header="Update Tools" x:Name="UpdateToolsContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
                     <MenuItem Header="Screenshot" x:Name="ScreenshotContextMenu" />
                     <MenuItem Header="Power" x:Name="PowerContextMenu">
@@ -334,6 +342,25 @@ $pinvokeCode = @'
                 </DataGrid.Columns>
             </DataGrid>
         </Grid>
+</Window>
+'@
+
+[string]$cdXAML = @'
+<Window x:Class="VMWare_GUI.Datastore_File_Picker"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Datastore File Picker" Height="450" Width="800">
+    <Grid>
+        <ListBox x:Name="listDatastore" HorizontalAlignment="Left" Height="268" Margin="97,46,0,0" VerticalAlignment="Top" Width="423"/>
+        <Label x:Name="labelPath" Content="Label" HorizontalAlignment="Left" Height="36" Margin="97,10,0,0" VerticalAlignment="Top" Width="368"/>
+        <Button x:Name="btnDatastoreOK" Content="OK" HorizontalAlignment="Left" Height="31" Margin="97,358,0,0" VerticalAlignment="Top" Width="134" IsDefault="True"/>
+        <Button x:Name="btnDatastoreCancel" Content="Cancel" HorizontalAlignment="Left" Height="31" Margin="291,358,0,0" VerticalAlignment="Top" Width="134" IsCancel="True"/>
+
+    </Grid>
 </Window>
 '@
 
@@ -718,7 +745,16 @@ Function Process-Snapshot
     if( $operation -eq 'ConsolidateSnapshot' )
     {
         $VM = Get-VM -Id $VMId
-        $VM.ExtensionData.ConsolidateVMDisks_Task()
+        if( ! ( $task = $VM.ExtensionData.ConsolidateVMDisks_Task() ) `
+            -or ! ($taskStatus = Get-Task -Id $task) `
+                -or $taskStatus.State -eq 'Error' )
+        {
+            [void][Windows.MessageBox]::Show( 'Task Failed' , $Operation , 'Ok' ,'Error' )
+        }
+        else
+        {
+            [void][Windows.MessageBox]::Show( 'Task Started' , $Operation , 'Ok' ,'Information' )
+        }
         $closeDialogue = $false
     }
     elseif( $Operation -eq 'TakeSnapShot' )
@@ -1058,8 +1094,149 @@ Function Show-SnapShotWindow
         $WPFbtnConsolidateSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'ConsolidateSnapShot' -VMId $vm.Id } )
 
         $result = $snapshotsForm.ShowDialog()
+     }
+}
+
+Function Populate-DataStoreFileList
+{
+    Param
+    (
+        [Parameter(Mandatory)]
+        [string]$path ,
+        [Parameter(Mandatory)]
+        $control ,
+        $form ,
+        $label ,
+        $filter
+    )
+    
+    $oldCursor = $form.Cursor
+    $form.Cursor = [Windows.Input.Cursors]::Wait
+
+    $dirErrors = $null
+    [array]$items = @( Get-ChildItem -Path $Path | Sort-Object -Property Name -ErrorVariable dirErrors )
+    
+    $form.Cursor = $oldCursor
+
+    if( ! $dirErrors -or ! $dirErrors.Count )
+    {
+        $control.Items.Clear()
+        ## only put in .. if not root
+        if( $path -notmatch '^vmstore:\\[^\\]*$' )
+        {
+            $null = $control.Items.Add( '..' )
+        }
+        $items | ForEach-Object `
+        {
+            if( $_.PSIsContainer -or ( ! [string]::IsNullOrEmpty( $filter ) -and $_.Name -like $filter ) )
+            {
+                $null = $control.Items.Add( $_.Name ) 
+            }
+        }
+        
+        if( $label )
+        {
+            $label.Content = $path
+        }
     }
 }
+
+Function Show-DatastoreFileChooser
+{
+    Param
+    (
+        $vm ,
+        $StartPath ,
+        $filter
+    )
+
+    $result = $null
+
+    if( $datastoreChooserForm = Load-GUI -inputXaml $cdXAMl )
+    {
+        if( [string]::IsNullOrEmpty( ( [string]$dataCentreName = Get-Datacenter -VM $vm | Select-Object -ExpandProperty Name ) ) )
+        {
+            Write-Error -Exception "Failed to get datacentre for vm $($vm.name)"
+            return
+        }
+
+        $datastoreChooserForm.Title += " for $($vm.Name)"
+
+        $WPFbtnDatastoreOK.Add_Click({
+            if( ( $item = $WPFlistDatastore.SelectedItem ) -and ! ( $item -is [array] ) )
+            {
+                ## Check a single file is selected
+                $datastoreChooserForm.DialogResult = $true 
+                $datastoreChooserForm.Close()
+            }
+            else
+            {
+                [void][Windows.MessageBox]::Show( "Must select exactly one file" , 'Datastore File Chooser' , 'Ok' ,'Warning' )
+            }})
+            
+        $WPFbtnDatastoreCancel.Add_Click({ 
+            $datastoreChooserForm.DialogResult = $false 
+            $datastoreChooserForm.Close()  })
+        
+        $WPFlistDatastore.add_MouseDoubleClick({
+            if( $item = $WPFlistDatastore.SelectedItem )
+            {
+                [string]$path = $(if( $item -eq '..' )
+                {
+                    Split-Path -Path $WPFlabelPath.Content -Parent
+                }
+                else
+                {
+                    Join-Path -Path $WPFlabelPath.Content -ChildPath $item
+                })
+                ## if selected item is a file then that is the one being selected
+                $oldCursor = $datastoreChooserForm.Cursor
+                $datastoreChooserForm.Cursor = [Windows.Input.Cursors]::Wait
+
+                $fileInfo = Get-ChildItem -Path $path -ErrorAction SilentlyContinue
+
+                $datastoreChooserForm.Cursor = $oldCursor
+
+                if( ! $fileInfo -or ! $fileInfo.PSIsContainer )
+                {
+                    $datastoreChooserForm.DialogResult = $true 
+                    $datastoreChooserForm.Close()
+                }
+                else ## folder
+                {
+                    Populate-DataStoreFileList -path $path -control $WPFlistDatastore -label $WPFlabelPath -filter $filter -form $datastoreChooserForm
+                }
+            }
+        })
+        
+        [string]$basePath = "vmstore:\$dataCentreName"
+
+        if( [string]::IsNullOrEmpty( $startPath ) )
+        {
+            $startPath = $basePath
+        }
+
+        Populate-DataStoreFileList -path $StartPath -control $WPFlistDatastore -label $WPFlabelPath -filter $filter -form $datastoreChooserForm
+
+        if( $datastoreChooserForm.ShowDialog() )
+        {
+            ## Convert this path to a [Datastore] Path
+            if( $item = $WPFlistDatastore.SelectedItem )
+            {
+                ## remove datastore and split first element as it is the datastore
+                [string[]]$pathElements = ((Join-Path -Path $WPFlabelPath.Content -ChildPath $item) -replace "^$([regex]::Escape( $basePath ))") -split '\\' , 3 | Select-Object -Last 2
+                if( $pathElements -and $pathElements.Count -eq 2 )
+                {
+                    ## Set-CDDrive will take / or \ but changing them means we can compare paths after mount to see if has succeeded
+                    $result = "[{0}] {1}" -f $pathElements[0] , $pathElements[1] -replace '\\' , '/'
+                }
+            }
+            $global:lastDatastoreFolder = $WPFlabelPath.Content
+        }
+    }
+    $result
+}
+
 
 ## See if we have HKCU or HKLM policy setting for this
 Function Get-PolicySettings
@@ -1129,7 +1306,19 @@ Function Process-Action
         else
         {
             [string]$address = $null
-            if( $operation -eq 'backup' )
+            if( $operation -eq 'updatetools' )
+            {
+                $guest = Get-View -VIObject $VM | Select-Object -ExpandProperty Guest
+                if( $guest.ToolsVersionStatus -ne 'guestToolsNeedUpgrade' )
+                {
+                    [void][Windows.MessageBox]::Show( "Tools version $($vm.Guest.ToolsVersion) does not need updating in $($vm.Name)" , 'Update VMware Tools Error' , 'Ok' ,'Error' )
+                }
+                else
+                {
+                    Update-Tools -NoReboot -RunAsync -VM $vm
+                }             
+            }
+            elseif( $operation -eq 'backup' )
             {
                 ## http://www.simonlong.co.uk/blog/2010/05/05/powercli-a-simple-vm-backup-script/
                 
@@ -1312,6 +1501,28 @@ Function Process-Action
                 {
                     [void][Windows.MessageBox]::Show( "No address for $($vm.Name)" , 'Connection Error' , 'Ok' ,'Warning' )
                 }
+            }
+            elseif( $Operation -eq 'ConnectCD' )
+            {
+                if( $cddrive = Get-CDDrive -VM $vm -ErrorAction SilentlyContinue )
+                {
+                    if( $file = Show-DatastoreFileChooser -VM $vm -StartPath $global:lastDatastoreFolder -filter '*.iso' )
+                    {
+                        Write-Verbose -Message "Mounting `"$file`" to $($vm.name)"
+                        if( ! ( $mounted = $cddrive | Set-CDDrive -IsoPath $file -Confirm:$false -Connected $true )-or $mounted.IsoPath -ne $file )
+                        {
+                            [void][Windows.MessageBox]::Show( "Error mounting `"$file`" in $($vm.Name)" , 'CD Mount Error' , 'Ok' ,'Exclamation' )
+                        }
+                    }
+                }
+                else
+                {
+                    [void][Windows.MessageBox]::Show( "No CD drive in $($vm.Name)" , 'CD Mount Error' , 'Ok' ,'Exclamation' )
+                }
+            }
+            elseif( $Operation -eq 'DisconnectCD' )
+            {
+                Get-CDDrive -VM $VM | Set-CDDrive -NoMedia -Confirm:$false
             }
             elseif( $Operation -eq 'console' )
             {
@@ -1998,6 +2209,10 @@ $WPFDeleteContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines
 $WPFScreenshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Screenshot'} )
 $WPFBackupContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Backup'} )
 $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
+$WPFCDConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'ConnectCD'} )
+$WPFCDDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'DisconnectCD'} )
+$WPFUpdateToolsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'UpdateTools'} )
+
 $WPFbtnDatastores.Add_Click({
     Show-DatastoresWindow
 })
