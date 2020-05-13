@@ -35,6 +35,7 @@
     @guyrleech 11/05/2020  Added run menu option & persisting these items to registry
                            Made screenshot window non-modal
                            Added missing event handler handled settings
+    @guyrleech 13/05/2020  Screenshot dialogue now resizes image on resize
 #>
 
 <#
@@ -351,7 +352,7 @@ $pinvokeCode = @'
         mc:Ignorable="d"
         Title="Screenshot" Height="700" Width="950">
     <Grid>
-        <Image x:Name="imgScreenshot" HorizontalAlignment="Stretch" Height="620" Margin="11,31,0,0" VerticalAlignment="Stretch" Width="922"/>
+        <Image x:Name="imgScreenshot" Margin="20,20,20,20"/>
 
     </Grid>
 </Window>
@@ -1601,6 +1602,7 @@ Function Process-Action
                             [string]$folder = $matches[2]
                             [string]$psdrivename = 'guyrleech'
 
+                            Write-Verbose -Message "$(Get-Date -Format G): creating PS drive $psdrivename to $share"
                             if( ![string]::IsNullOrEmpty( $share ) -and ( $psdrive = New-PSDrive -Name $psdrivename -PSProvider FileSystem -Root $share -Scope script -confirm:$false -Description "Temporary for Guy's script" @credentialParameter ) )
                             {
                                 [string]$remotePath = Join-Path -Path "$($psdrivename):" -ChildPath $folder
