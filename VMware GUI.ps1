@@ -32,6 +32,9 @@
     @guyrleech 02/05/2020  Added console screenshot feature & -screenshotfolder to persist the image files
     @guyrleech 07/05/2020  Message box shown for snapshot consolidation to confirm task started
     @guyrleech 09/05/2020  Added CD mounting/unmounting facility and upgrading VMware tools
+    @guyrleech 11/05/2020  Added run menu option & persisting these items to registry
+                           Made screenshot window non-modal
+                           Added missing event handler handled settings
 #>
 
 <#
@@ -183,8 +186,10 @@ Param
     [string]$exclude = 'uptime' ,
     [switch]$noReuseMstsc ,
     [int]$maxEvents = 10000 ,
+    [int]$OutputWidth = 400 ,
     [string]$screenShotFolder ,
     [string]$sortProperty = 'Name' ,
+    [string]$remoteScriptPath ,
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
     [string]$vmwareModule = 'VMware.VimAutomation.Core'
@@ -217,6 +222,9 @@ $pinvokeCode = @'
 
 [string]$youAreHereSnapshot = 'YouAreHere' 
 [string]$global:lastDatastoreFolder = $null
+[array]$global:scriptHistory = @()
+[array]$global:scriptArgumentsHistory = @()
+[System.Management.Automation.PSCredential]$global:lastCredential = $null
 
 #region XAML
 [string]$mainwindowXAML = @'
@@ -237,15 +245,16 @@ $pinvokeCode = @'
         <DataGrid HorizontalAlignment="Stretch" VerticalAlignment="Top" x:Name="VirtualMachines" >
             <DataGrid.ContextMenu>
                 <ContextMenu>
-                    <MenuItem Header="Console" x:Name="ConsoleContextMenu" />
-                    <MenuItem Header="Mstsc" x:Name="MstscContextMenu" />
+                    <MenuItem Header="_Console" x:Name="ConsoleContextMenu" />
+                    <MenuItem Header="_Run" x:Name="RunScriptContextMenu" />
+                    <MenuItem Header="_Mstsc" x:Name="MstscContextMenu" />
                     <MenuItem Header="Mstsc (New)" x:Name="MstscNewContextMenu" />
                     <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
                     <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
-                    <MenuItem Header="CD" x:Name="CDContextMenu" >
+                    <MenuItem Header="_CD" x:Name="CDContextMenu" >
                         <MenuItem Header="Mount" x:Name="CDConnectContextMenu" />
                         <MenuItem Header="Eject" x:Name="CDDisconnectContextMenu" />
                     </MenuItem>
@@ -267,6 +276,71 @@ $pinvokeCode = @'
 </Window>
 '@
 
+[string]$textOutputXAML = @'
+<Window x:Class="VMWare_GUI.Text_Output"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Text_Output" Height="450" Width="800">
+    <Grid>
+        <TextBox x:Name="txtTextOutput" HorizontalAlignment="Stretch" Margin="24,16,0,0" TextWrapping="NoWrap" VerticalAlignment="Stretch" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" AllowDrop="False" FontFamily="Consolas"/>
+    </Grid>
+</Window>
+'@
+
+[string]$runScriptXAML = @'
+<Window x:Class="VMWare_GUI.Run_Script"
+            xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+            xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+            xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:local="clr-namespace:VMWare_GUI"
+            mc:Ignorable="d"
+            Title="Run_Script" Height="462.676" Width="800">
+    <Grid>
+        <Label Content="Script/Cmdlet/Exe" HorizontalAlignment="Left" Height="33" Margin="10,31,0,0" VerticalAlignment="Top" Width="112"/>
+        <Label Content="Arguments" HorizontalAlignment="Left" Height="27" Margin="12,102,0,0" VerticalAlignment="Top" Width="75"/>
+        <Grid Margin="12,205,502,161">
+            <RadioButton x:Name="radioWinRM" Content="WinRM" HorizontalAlignment="Left" Height="21" Margin="115,6,0,0" VerticalAlignment="Top" Width="163" GroupName="ScriptInvocation" IsChecked="True"/>
+            <RadioButton x:Name="radioVmwareTools" Content="VMware Tools" HorizontalAlignment="Left" Height="21" Margin="115,32,0,0" VerticalAlignment="Top" Width="163" GroupName="ScriptInvocation" IsEnabled="False"/>
+            <Label Content="Invocation" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="84"/>
+        </Grid>
+        <Grid Margin="12,256,502,63">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="139*"/>
+                <ColumnDefinition Width="17*"/>
+                <ColumnDefinition Width="123*"/>
+            </Grid.ColumnDefinitions>
+            <RadioButton x:Name="radioWindow" Content="_Window" HorizontalAlignment="Left" Height="24" Margin="115,8,0,0" VerticalAlignment="Top" Width="163" GroupName="Output" IsThreeState="True" IsChecked="True" Grid.ColumnSpan="3"/>
+            <RadioButton x:Name="radioGridview" Content="_GridView" HorizontalAlignment="Left" Height="24" Margin="115,32,0,0" VerticalAlignment="Top" Width="163" GroupName="Output" IsThreeState="True" Grid.ColumnSpan="3"/>
+            <RadioButton x:Name="radioTextFile" Content="_Text File" HorizontalAlignment="Left" Height="24" Margin="115,56,0,0" VerticalAlignment="Top" Width="163" GroupName="Output" IsThreeState="True" Grid.ColumnSpan="3"/>
+            <Label Content="Results" HorizontalAlignment="Left" Height="32" VerticalAlignment="Top" Width="76"/>
+            <RadioButton x:Name="radioCSVFile" Content="CS_V File" HorizontalAlignment="Left" Height="20" Margin="115,80,0,0" VerticalAlignment="Top" Width="100" GroupName="Output" Grid.ColumnSpan="3"/>
+        </Grid>
+        <Button x:Name="btnRunScriptOK" Content="OK" HorizontalAlignment="Left" Height="39" Margin="127,374,0,0" VerticalAlignment="Top" Width="97" IsDefault="True"/>
+        <Button x:Name="btnRunScriptCancel" Content="Cancel" HorizontalAlignment="Left" Height="39" Margin="260,374,0,0" VerticalAlignment="Top" Width="97" IsCancel="True"/>
+        <Button x:Name="brnRunScriptFileChooser" Content="..." HorizontalAlignment="Left" Height="33" Margin="633,31,0,0" VerticalAlignment="Top" Width="53"/>
+        <Grid Margin="12,148,568,214">
+            <Label Content="Location" HorizontalAlignment="Left" Height="26" VerticalAlignment="Top" Width="86"/>
+            <RadioButton x:Name="radioLocalToVM" Content="_Local to VM" HorizontalAlignment="Left" Height="26" Margin="115,6,0,0" VerticalAlignment="Top" Width="97" GroupName="Location"/>
+            <RadioButton x:Name="radioCopyToVM" Content="_Copy to VM" HorizontalAlignment="Left" Height="26" Margin="115,31,0,0" VerticalAlignment="Top" Width="97" GroupName="Location" IsChecked="True"/>
+
+        </Grid>
+        <CheckBox x:Name="chkRunScriptUseSSL" Content="_Use SSL" HorizontalAlignment="Left" Height="16" Margin="275,211,0,0" VerticalAlignment="Top" Width="82"/>
+        <CheckBox x:Name="chkRunScriptCredentials" Content="_Specify Credentials" HorizontalAlignment="Left" Height="15" Margin="275,239,0,0" VerticalAlignment="Top" Width="144"/>
+        <CheckBox x:Name="chkRunScriptClearCredentials" Content="Clear Credentials" HorizontalAlignment="Left" Height="15" Margin="412,239,0,0" VerticalAlignment="Top" Width="131"/>
+        <CheckBox x:Name="chkRunScriptConcatenate" Content="Co_ncatenate Results" HorizontalAlignment="Left" Height="22" Margin="412,212,0,0" VerticalAlignment="Top" Width="131"/>
+        <ComboBox x:Name="comboScriptName" HorizontalAlignment="Left" Height="33" Margin="127,31,0,0" VerticalAlignment="Top" Width="480" AllowDrop="True" IsEditable="True"/>
+        <ComboBox x:Name="comboScriptArguments" HorizontalAlignment="Left" Height="36" Margin="127,93,0,0" VerticalAlignment="Top" Width="480" IsEditable="True"/>
+        <CheckBox x:Name="chkRunScriptModal" Content="_Modal" HorizontalAlignment="Left" Height="16" Margin="563,211,0,0" VerticalAlignment="Top" Width="154"/>
+
+    </Grid>
+</Window>
+'@
+
 [string]$screenshotXAML = @'
 <Window x:Class="VMWare_GUI.Screenshot"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -277,7 +351,7 @@ $pinvokeCode = @'
         mc:Ignorable="d"
         Title="Screenshot" Height="700" Width="950">
     <Grid>
-        <Image x:Name="imgScreenshot" HorizontalAlignment="Left" Height="620" Margin="11,31,0,0" VerticalAlignment="Top" Width="922"/>
+        <Image x:Name="imgScreenshot" HorizontalAlignment="Stretch" Height="620" Margin="11,31,0,0" VerticalAlignment="Stretch" Width="922"/>
 
     </Grid>
 </Window>
@@ -565,13 +639,10 @@ Function Set-Filters
         $wpfchkPoweredOff.IsChecked = $showPoweredOff
         $wpfchkSuspended.IsChecked = $showSuspended
 
-        $WPFbtnFiltersOk.Add_Click({ 
+        $WPFbtnFiltersOk.Add_Click({
+            $_.Handled = $true
             $filtersForm.DialogResult = $true 
             $filtersForm.Close()  })
-
-        $WPFbtnFiltersCancel.Add_Click({
-            $filtersForm.DialogResult = $false 
-            $filtersForm.Close() })
 
         $result = $filtersForm.ShowDialog()
     }
@@ -595,12 +666,9 @@ Function Set-Configuration
         $WPFcomboMemory.SelectedItem = $WPFcomboMemory.Items.GetItemAt(1)
         $wpftxtNotes.Text = $vm.Notes
         $WPFbtnReconfigureOk.Add_Click({ 
+            $_.Handled = $true
             $reconfigureForm.DialogResult = $true 
             $reconfigureForm.Close()  })
-
-        $WPFbtnReconfigureCancel.Add_Click({
-            $reconfigureForm.DialogResult = $false 
-            $reconfigureForm.Close() })
 
         $result = $reconfigureForm.ShowDialog()
     }
@@ -765,12 +833,9 @@ Function Process-Snapshot
             $takeSnapshotForm.Title += " of $($vm.name)"
 
             $WPFbtnTakeSnapshotOk.Add_Click({ 
+                $_.Handled = $true
                 $takeSnapshotForm.DialogResult = $true 
                 $takeSnapshotForm.Close()  })
-
-            $WPFbtnTakeSnapshotCancel.Add_Click({
-                $takeSnapshotForm.DialogResult = $false 
-                $takeSnapshotForm.Close() })
 
             if( $takeSnapshotForm.ShowDialog() )
             {
@@ -1062,13 +1127,10 @@ Function Show-SnapShotWindow
             Write-Warning "No current snapshot set for $($vm.Name)"
         }
 
-        $WPFbtnSnapshotsOk.Add_Click({ 
+        $WPFbtnSnapshotsOk.Add_Click({
+            $_.Handled = $true 
             $snapshotsForm.DialogResult = $true 
             $snapshotsForm.Close()  })
-
-        $WPFbtnSnapShotsCancel.Add_Click({
-            $snapshotsForm.DialogResult = $false 
-            $snapshotsForm.Close() })
 
         ## get last revert operation
         $lastRevert = Get-VIEvent -Entity $vm.Name -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties[ 'EventTypeId' ] -and $_.EventTypeId -eq 'com.vmware.vc.vm.VmStateRevertedToSnapshot' -and $_.FullFormattedMessage -match 'has been reverted to the state of snapshot (.*), with ID \d' } | Select-Object -First 1
@@ -1163,6 +1225,7 @@ Function Show-DatastoreFileChooser
         $datastoreChooserForm.Title += " for $($vm.Name)"
 
         $WPFbtnDatastoreOK.Add_Click({
+            $_.Handled = $true
             if( ( $item = $WPFlistDatastore.SelectedItem ) -and ! ( $item -is [array] ) )
             {
                 ## Check a single file is selected
@@ -1173,12 +1236,9 @@ Function Show-DatastoreFileChooser
             {
                 [void][Windows.MessageBox]::Show( "Must select exactly one file" , 'Datastore File Chooser' , 'Ok' ,'Warning' )
             }})
-            
-        $WPFbtnDatastoreCancel.Add_Click({ 
-            $datastoreChooserForm.DialogResult = $false 
-            $datastoreChooserForm.Close()  })
-        
+
         $WPFlistDatastore.add_MouseDoubleClick({
+            $_.Handled = $true
             if( $item = $WPFlistDatastore.SelectedItem )
             {
                 [string]$path = $(if( $item -eq '..' )
@@ -1268,6 +1328,74 @@ Function Get-PolicySettings
     $result ## return
 }
 
+Function Process-ScriptResults
+{
+    Param
+    (
+        $scriptDetails ,
+        $result ,
+        [string]$message
+    )
+
+    if( $scriptDetails.Output -eq 'gridview' )
+    {
+        [hashtable]$gridviewParameters = @{ 'Title' = $message }
+        if( $scriptDetails.Modal -eq 'Yes' )
+        {
+            $gridviewParameters.Add( 'PassThru' , $true )
+        }
+        if( $selected = @( $result | Out-GridView @gridviewParameters ) )
+        {
+            $selected | Out-String -Width $outputWidth | Set-Clipboard
+        }
+    }
+    elseif( $scriptDetails.Output -eq 'window' )
+    {
+        if( $textOutputForm = Load-GUI -inputXaml $textOutputXAML )
+        {
+            $textOutputForm.Title = $message
+            $WPFtxtTextOutput.TextWrapping = 'NoWrap'
+            $WPFtxtTextOutput.Text = $result | Out-String -Width $outputWidth
+            if( $scriptDetails.Modal -eq 'Yes' )
+            {
+                $textOutputForm.ShowDialog()
+            }
+            else
+            {
+                $textOutputForm.Show()
+            }
+        }
+    }
+    elseif( $scriptDetails.Output -eq 'textfile' )
+    {
+        if( $tempFile = New-TemporaryFile )
+        {
+            $result | Out-File -FilePath $tempFile.FullName
+            $tempFile.FullName | Set-Clipboard
+            [Windows.MessageBox]::Show( "$message`nWritten to `"$($tempFile.FullName)`"" , "Run Script Complete" , 'Ok' ,'Information' )
+        }
+        else
+        {
+            [Windows.MessageBox]::Show( "Failed to get temp file to write script results from $($VM.Name)" , "Run Script Error" , 'Ok' ,'Error' )
+        }
+    }
+    elseif( $scriptDetails.Output -eq 'CSVfile' )
+    {
+        if( $tempFile = New-TemporaryFile )
+        {
+            [string]$csvFileName = $tempFile.FullName -replace '\.[a-z]{3]$' , '.csv'
+            $tempFile | Remove-Item
+            $result | Export-Csv -Path $csvFileName -NoClobber -NoTypeInformation -UseCulture
+            $csvFileName | Set-Clipboard
+            [Windows.MessageBox]::Show( "$message`nWritten to `"$csvFileName`"" , "Run Script Complete" , 'Ok' ,'Information' )
+        }
+        else
+        {
+            [Windows.MessageBox]::Show( "Failed to get temp file to write script results from $($VM.Name)" , "Run Script Error" , 'Ok' ,'Error' )
+        }
+    }
+}
+
 Function Process-Action
 {
     Param
@@ -1284,8 +1412,25 @@ Function Process-Action
     {
         return
     }
+
+    [pscustomobject]$scriptDetails = @{
+        'Path' = $null
+        'Arguments' = $null
+        'Output' = $null
+        'LocalScript' = $null
+        'Invocation' = $null
+        'Modal' = $null
+        'Concatenate' = $null }
+
+    [bool]$doAll = $false ## 
+    [string]$answer = $null
+    [int]$loopIterations = 0
+    $scriptResults = New-Object -TypeName System.Collections.Generic.List[psobject]
+    [int]$scriptsRun = 0
+
     ForEach( $selectedVM in $selectedVMs )
     {
+        $loopIterations++
         ## Don't use VM cache here in case changed since cache made
         $getError = $null
         $vm = VMware.VimAutomation.Core\Get-VM -Name $selectedVM.Name -ErrorVariable getError | Where-Object { $_.VMHost.Name -eq $selectedVM.Host }
@@ -1318,6 +1463,262 @@ Function Process-Action
                     Update-Tools -NoReboot -RunAsync -VM $vm
                 }             
             }
+            elseif( $operation -eq 'RunScript' )
+            {
+                if( ! $scriptDetails.Path )
+                {
+                    if( $runScriptForm = Load-GUI -inputXaml $runScriptXAML )
+                    {
+                        $WPFbtnRunScriptOK.Add_Click({
+                            $_.Handled = $true
+                            if( ! [string]::IsNullOrEmpty( $WPFcomboScriptName.Text ) )
+                            {
+                                [bool]$proceed = $true
+                                [bool]$dontCheck = $false
+
+                                If( $WPFradioCopyToVM.IsChecked -or ($dontCheck = ( $WPFradioLocalToVM.IsChecked -and $scriptDetails.Path -notmatch '^[a-z]:' ))) ## won't check files local to the VM, unless a UNC, as we'll find out soon enough if they exist or not but must get cmdlets/exes
+                                {
+                                    If( $dontCheck -or ( Test-Path -Path ($WPFcomboScriptName.Text -replace '"') -PathType Leaf -ErrorAction SilentlyContinue ))
+                                    {
+                                        ## manually entered text won't make it into the list so we add them so they can be in the history
+                                        if( ! $WPFcomboScriptName.Items -or ! $WPFcomboScriptName.Items.Count -or ! $WPFcomboScriptName.Items.Contains( $WPFcomboScriptName.Text ) )
+                                        {
+                                            $WPFcomboScriptName.Items.Add( $WPFcomboScriptName.Text )
+                                        }
+                                        if( ! [string]::IsNullOrEmpty( $WPFcomboScriptArguments.Text ) -and ( ! $WPFcomboScriptArguments.Items -or ! $WPFcomboScriptArguments.Items.Count -or ! $WPFcomboScriptArguments.Items.Contains( $WPFcomboScriptArguments.Text ) ) )
+                                        {
+                                            $WPFcomboScriptArguments.Items.Add( $WPFcomboScriptArguments.Text )
+                                        }
+                                    }
+                                    else
+                                    {
+                                        [void][Windows.MessageBox]::Show( "Cannot access `"$($WPFcomboScriptName.Text)`"" , 'Run Script' , 'Ok' ,'Warning' )
+                                        $proceed = $false
+                                    }
+                                }
+                                if( $proceed )
+                                {
+                                    $runScriptForm.DialogResult = $true 
+                                    $runScriptForm.Close()
+                                }
+                            }
+                            else
+                            {
+                                [void][Windows.MessageBox]::Show( "Must set a script, exe or cmdlet" , 'Run Script' , 'Ok' ,'Warning' )
+                            }})
+            
+                        $WPFbrnRunScriptFileChooser.Add_Click({
+                            $_.Handled = $true
+                            if( $fileBrowser = New-Object -TypeName System.Windows.Forms.OpenFileDialog )
+                            {
+                                $fileBrowser.InitialDirectory = Split-Path $script:MyInvocation.MyCommand.Path -Parent
+                                if( ( $result = $fileBrowser.ShowDialog() ) -eq 'OK' )
+                                {
+                                    [string]$fileToAdd = "`"$($fileBrowser.FileName)`""
+                                    if( ! $WPFcomboScriptName.Items.Contains( $fileToAdd ) )
+                                    {
+                                        $WPFcomboScriptName.Items.Add( $fileToAdd )
+                                    }
+                                    $WPFcomboScriptName.SelectedItem = $fileToAdd
+                                }
+                            }
+                        })
+
+                        if( $global:scriptHistory -and $global:scriptHistory.Count )
+                        {
+                            ## don't add as source as then can't modify the global variable
+                            ($global:scriptHistory).ForEach( { $WPFcomboScriptName.Items.Add( $_ ) } )
+                        }
+                        
+                        if( $global:scriptArgumentsHistory -and $global:scriptArgumentsHistory.Count )
+                        {
+                            ($global:scriptArgumentsHistory).ForEach( { $WPFcomboScriptArguments.Items.Add( $_ ) } )
+                        }
+
+                        if( $runScriptForm.ShowDialog() )
+                        {
+                            $scriptDetails.Path = $WPFcomboScriptName.Text
+                            $scriptDetails.Arguments = $WPFcomboScriptArguments.Text
+                            $scriptDetails.Output = $(if( $WPFradioGridview.IsChecked ) { 'GridView' } elseif( $WPFradioWIndow.IsChecked ) { 'Window' } elseif( $WPFradioCSVFile.IsChecked ) { 'CSVFile' } else { 'TextFile' })
+                            $scriptDetails.LocalScript = $(if( $WPFradioLocalToVM.IsChecked ) { 'Local' } else { 'Copy' })
+                            $scriptDetails.Invocation = $(if( $WPFradioVmwareTools.IsChecked ) { 'VMwareTools' } else { 'WinRM' })
+                            $scriptDetails.Concatenate = $(if( $WPFchkRunScriptConcatenate.IsChecked ) { 'Yes' } else { 'No' })
+                            $scriptDetails.Modal = $(if( $WPFchkRunScriptModal.IsChecked ) { 'Yes' } else { 'No' })
+                            ## save file and argument list for next time
+                            $global:scriptHistory = $wpfcomboScriptName.Items.Clone()
+                            if( $WPFcomboScriptArguments.Items -and $WPFcomboScriptArguments.Items.Count )
+                            {
+                                $global:scriptArgumentsHistory = $WPFcomboScriptArguments.Items.Clone()
+                            }
+                        }
+                        ## else cancelled so $scriptDetails.Path will be null
+                    }
+                }
+                if( $scriptDetails.Path )
+                {
+                    if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
+                    {
+                        $answer = [Windows.MessageBox]::Show( "Are you sure you want to run the script on $($selectedVMs.Count - $loopIterations + 1) VMs.`n Yes for All, No for just $($VM.Name) or Cancel for none" , "Confirm Run Script Operation" , 'YesNoCancel' ,'Question' )
+                    }
+                    if( $answer -eq 'Cancel' )
+                    {
+                        return
+                    }
+                    [string]$remoteFile = $null
+                    $newCredential = $null
+                    $psdrive = $null
+                    
+                    if( $WPFchkRunScriptClearCredentials.IsChecked )
+                    {
+                        $global:lastCredential = $null
+                    }
+
+                    if( $WPFchkRunScriptCredentials.IsChecked )
+                    {
+                        if( ! ( $newCredential = $global:lastCredential ))
+                        {
+                            if( $newCredential = Get-Credential -Message "Credentials to run script" )
+                            {
+                                $global:lastCredential = $newCredential
+                            }
+                        }
+                    }
+
+                    [string]$localScriptToRun = $( if( $WPFradioCopyToVM.IsChecked )
+                    {
+                        [hashtable]$credentialParameter = @{}
+                        if( $newCredential )
+                        {
+                            $credentialParameter.Add( 'Credential' , $newCredential )
+                        }
+
+                        [string]$remoteFolder = Join-Path -Path "\\$($vm.Name)\" -ChildPath $(if( ! [string]::IsNullOrEmpty( $remoteScriptPath ) ) { $remoteScriptPath -replace ':' , '$' } else { 'c$\GuysScripts' })
+
+                        ## Map the share as a PS drive so we can use credentials
+                        if( $remoteFolder -match '^(\\\\[^\\]+\\[^\\]+)(.*$)?' )
+                        {
+                            [string]$share = $matches[1]
+                            [string]$folder = $matches[2]
+                            [string]$psdrivename = 'guyrleech'
+
+                            if( ![string]::IsNullOrEmpty( $share ) -and ( $psdrive = New-PSDrive -Name $psdrivename -PSProvider FileSystem -Root $share -Scope script -confirm:$false -Description "Temporary for Guy's script" @credentialParameter ) )
+                            {
+                                [string]$remotePath = Join-Path -Path "$($psdrivename):" -ChildPath $folder
+                                if( ! ( Test-Path -Path $remotePath -PathType Container -ErrorAction SilentlyContinue ) )
+                                {
+                                    if( ! ( $newFolder = New-Item -Path $remotePath -ItemType Directory ) )
+                                    {
+                                        [Windows.MessageBox]::Show( "Failed to create remote folder `"$remotePath`"" , "Run Script Error" , 'Ok' ,'Error' )
+                                    }
+                                }
+
+                                [string]$fileExtension = [System.IO.Path]::GetExtension( ( $scriptDetails.Path -replace '"' ) )
+                                $remoteFile = Join-Path -Path $remotePath -ChildPath ((New-Guid).Guid + $fileExtension)
+
+                                if( Test-Path -Path $remoteFile -ErrorAction SilentlyContinue )
+                                {
+                                    [Windows.MessageBox]::Show( "Remote script `"$remoteFile`" already exists so cannot run" , "Run Script Error" , 'Ok' ,'Error' )
+                                }
+                                elseif( $copiedItem = Copy-Item -PassThru -Path ($scriptDetails.Path -replace '"') -Destination $remoteFile )
+                                {
+                                    ## Now make the path local
+                                    ## TODO This may not work if -remoteScriptPath was specified
+                                    $copiedItem -replace '^\\\\[^\\]+\\([^\$])\$(.+)$' , '$1:$2'
+                                }
+                                else
+                                {
+                                    [Windows.MessageBox]::Show( "Failed to copy script from `"$($scriptDetails.Path)`" to `"$remoteFile`"" , "Run Script Error" , 'Ok' ,'Error' )
+                                }
+                            }
+                            else
+                            {
+                                [Windows.MessageBox]::Show( "Failed to map drive to $share" , "Run Script Error" , 'Ok' ,'Error' )
+                            }
+                        }
+                        else
+                        {
+                            [Windows.MessageBox]::Show( "Unable to split `"$remoteFolder`"" , "Run Script Error" , 'Ok' ,'Error' )
+                        }
+                    }
+                    else
+                    {
+                        $scriptDetails.Path
+                    })
+
+                    if( ! [string]::IsNullOrEmpty( $localScriptToRun ) )
+                    {
+                        [datetime]$scriptStartTime = Get-Date
+
+                        $oldCursor = $(if( $GUIobject )
+                            {
+                                $GUIobject.Cursor
+                                $GUIobject.Cursor = [Windows.Input.Cursors]::Wait
+                            })
+
+                        if( $scriptDetails.Invocation -eq 'WinRM' )
+                        {
+                            ## seems that Invoke-Command can't take named parameters so we have to resort to this and chear by using csv format to give a grid view
+                            ## Don't quote file as may just be a cmdlet
+                            [string]$scriptArguments = $scriptDetails.Arguments
+                            [hashtable]$invokeCommandArguments = @{
+                                'ComputerName' = $vm.Guest.HostName
+                                'UseSSL' = $WPFchkRunScriptUseSSL.IsChecked
+                            }
+                            if( $newCredential )
+                            {
+                                $invokeCommandArguments.Add( 'Credential' , $newCredential )
+                            }
+                        
+                            Write-Verbose "$(Get-Date -Format G): running `"$localScriptToRun`" on $($vm.name)"
+                            $result = Invoke-Command -ScriptBlock { Invoke-Expression -Command "& $using:localScriptToRun $using:scriptArguments" } @invokeCommandArguments
+                        }
+                        else ## execute via VMware tools
+                        {
+                            ## TODO Implement
+                        }
+
+                        if( $GUIobject )
+                        {
+                            $GUIobject.Cursor = $oldCursor ## will set default if not set
+                        }
+                    }
+
+                    [datetime]$scriptEndTime = Get-Date
+                    
+                    if( $remoteFile )
+                    {
+                        Remove-Item -Path $remoteFile
+                    }
+                    
+                    if( $psdrive )
+                    {
+                        $psdrive | Remove-PSDrive -Force
+                        $psdrive = $null
+                    }
+
+                    if( $result )
+                    {
+                        $scriptsRun++
+                        if( $scriptDetails.Concatenate -eq 'Yes' )
+                        {
+                            $scriptResults += $result
+                        }
+                        else
+                        {
+                            [string]$message = "Output from `"$($scriptDetails.Path)`" on $($vm.Name) at $(Get-Date -Date $scriptStartTime -Format G)"
+                            Process-ScriptResults -scriptDetails $scriptDetails -result $result -message $message
+                        }
+                    }
+                    else
+                    {
+                        [Windows.MessageBox]::Show( "Empty script results from $($VM.Name)" , "Run Script" , 'Ok' ,'Warning' )
+                    }
+                }
+                else ## no script because dialog was cancelled
+                {
+                    return
+                }
+            }
             elseif( $operation -eq 'backup' )
             {
                 ## http://www.simonlong.co.uk/blog/2010/05/05/powercli-a-simple-vm-backup-script/
@@ -1342,6 +1743,7 @@ Function Process-Action
                     }
                     
                     $WPFbtnBackupOK.Add_Click({
+                        $_.Handled = $true
                         if( ! $wpfcomboDatastore.SelectedItem )
                         {
                             [void][Windows.MessageBox]::Show( "Must select the destination datastore for the backup" , 'Backup Error' , 'Ok' ,'Error' )
@@ -1720,7 +2122,7 @@ Function Process-Action
                                 $bitmap.EndInit()
                                 $wpfimgScreenshot.Source = $bitmap
                                 $screenshotWindow.Title = "Screenshot of $($vm.Name) at $(Get-Date -Date $snapshotTime)"
-                                $screenshotWindow.ShowDialog()
+                                $screenshotWindow.Show()
                                 $bitmap.StreamSource = $null
                                 $filestream.Close()
                                 $filestream = $null
@@ -1785,6 +2187,12 @@ Function Process-Action
                 Write-Warning "Unknown operation $Operation"
             }
         }
+    }
+
+    if( $scriptResults -and $scriptResults.Count )
+    {
+        [string]$message = "Output from `"$($scriptDetails.Path)`" on $ScriptsRun VMs at $(Get-Date -Format G)"
+        Process-ScriptResults -scriptDetails $scriptDetails -result $scriptResults -message $message
     }
 }
 
@@ -1881,7 +2289,7 @@ Function Get-VMs
             {
                 if( $vm.PSObject.Properties[ $field ] )
                 {
-                    [void]$items.Add( $vm.$field )
+                    $null = $items.Add( $vm.$field )
                 }
             }
             [void]$datatable.Rows.Add( [array]$items )
@@ -2130,7 +2538,7 @@ if( ! $ipV6 )
     $addressPattern = '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
 }
 
-[void][Reflection.Assembly]::LoadWithPartialName( 'Presentationframework' )
+Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase,System.Windows.Forms
 
 $mainForm = Load-GUI -inputXaml $mainwindowXAML
 
@@ -2212,11 +2620,14 @@ $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines
 $WPFCDConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'ConnectCD'} )
 $WPFCDDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'DisconnectCD'} )
 $WPFUpdateToolsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'UpdateTools'} )
+$WPFRunScriptContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'RunScript'} )
 
 $WPFbtnDatastores.Add_Click({
+    $_.Handled = $true
     Show-DatastoresWindow
 })
 $WPFbtnHosts.Add_Click({
+    $_.Handled = $true
     Show-HostsWindow
 })
 $WPFbtnFilter.Add_Click({
@@ -2256,7 +2667,38 @@ $mainForm.add_KeyDown({
     }    
 })
 
+$global:scriptHistory = Get-ItemProperty -Path $regKey -Name 'Scripts' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Scripts
+$global:scriptArgumentsHistory = Get-ItemProperty -Path $regKey -Name 'ScriptArguments' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ScriptArguments
+
 $result = $mainForm.ShowDialog()
+
+## if we have run history then save to registry
+if( $global:scriptHistory -and $global:scriptHistory.Count )
+{
+    if( ! (Test-Path -Path $regKey -PathType Container -ErrorAction SilentlyContinue ) )
+    {
+        $null = New-Item -Path $regKey -Force
+    }
+    ## array is objects but reg provider only likes strings or bytes
+    [string[]]$strings = $global:scriptHistory
+    if( $strings -and $strings.Count )
+    {
+        Set-ItemProperty -Path $regKey -Name 'Scripts' -Value $strings
+    }
+}
+
+if( $global:scriptArgumentsHistory -and $global:scriptArgumentsHistory.Count )
+{
+    if( ! (Test-Path -Path $regKey -PathType Container -ErrorAction SilentlyContinue ) )
+    {
+        $null = New-Item -Path $regKey -Force
+    }
+    [string[]]$strings = $global:scriptArgumentsHistory
+    if( $strings -and $strings.Count )
+    {
+        Set-ItemProperty -Path $regKey -Name 'ScriptArguments' -Value $strings
+    }
+}
 
 if( $rdpFileName )
 {
@@ -2272,4 +2714,3 @@ if( ! $alreadyConnected -and $connection )
 {
     $connection | Disconnect-VIServer -Force -Confirm:$false
 }
-
