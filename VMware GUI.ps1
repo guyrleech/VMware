@@ -169,7 +169,7 @@ Param
     [string]$vmName = '*' ,
     [int]$rdpPort = 3389 ,
     [string]$mstscParams ,
-    [ValidateSet('mstsc','console','PowerOn','reconfigure','snapshots','Delete','backup')]
+    [ValidateSet('mstsc','console','PowerOn','reconfigure','snapshots','Delete','backup','ConnectCD','DisconnectCD','UpdateTools','RunScript','Events','MstscNew','LatestSnapshotRevert','ScreenShot')]
     [string]$doubleClick = 'mstsc',
     [switch]$saveCredentials ,
     [switch]$ipv6 ,
