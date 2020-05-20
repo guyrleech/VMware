@@ -36,6 +36,9 @@
                            Made screenshot window non-modal
                            Added missing event handler handled settings
     @guyrleech 13/05/2020  Screenshot dialogue now resizes image on resize
+    @guyrleech 16/05/2020  Changed screenshot copy file code to use /folder web method & added Delete screenshot button
+    @guyrleech 18/05/2020  Changed CD mount datastore file browser to use /folder method, fixed multiple datastore prompts when select mount CD on multiple machines
+    @guyrleech 20/05/2020  Added Back button to datstore browser, rejigged datastore file picker to be resizeable, sort columns and put dates in locale format
 #>
 
 <#
@@ -352,8 +355,8 @@ $pinvokeCode = @'
         mc:Ignorable="d"
         Title="Screenshot" Height="700" Width="950">
     <Grid>
-        <Image x:Name="imgScreenshot" Margin="20,20,20,20"/>
-
+        <Image x:Name="imgScreenshot" Margin="20,20,20,83"/>
+        <Button x:Name="btnDeleteScreenShot" Content="_Delete Snapshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Top" Width="187"/>
     </Grid>
 </Window>
 '@
@@ -430,11 +433,24 @@ $pinvokeCode = @'
         mc:Ignorable="d"
         Title="Datastore File Picker" Height="450" Width="800">
     <Grid>
-        <ListBox x:Name="listDatastore" HorizontalAlignment="Left" Height="268" Margin="97,46,0,0" VerticalAlignment="Top" Width="423"/>
-        <Label x:Name="labelPath" Content="Label" HorizontalAlignment="Left" Height="36" Margin="97,10,0,0" VerticalAlignment="Top" Width="368"/>
-        <Button x:Name="btnDatastoreOK" Content="OK" HorizontalAlignment="Left" Height="31" Margin="97,358,0,0" VerticalAlignment="Top" Width="134" IsDefault="True"/>
-        <Button x:Name="btnDatastoreCancel" Content="Cancel" HorizontalAlignment="Left" Height="31" Margin="291,358,0,0" VerticalAlignment="Top" Width="134" IsCancel="True"/>
-
+        <Label x:Name="labelPath" Content="Label" HorizontalAlignment="Stretch" Height="36" Margin="87,23,0,0" VerticalAlignment="Top" />
+        <Button x:Name="btnDatastoreOK" Content="OK" HorizontalAlignment="Left" Height="31" Margin="32,358,0,10" VerticalAlignment="Bottom" Width="134" IsDefault="True"/>
+        <Button x:Name="btnDatastoreCancel" Content="Cancel" HorizontalAlignment="Left" Height="31" Margin="200,358,0,10" VerticalAlignment="Bottom" Width="134" IsCancel="True"/>
+        <Grid Margin="32,46,118,92">
+            <ListView x:Name="listviewDatastore" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Margin="0,13,0,-13">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="Item" DisplayMemberBinding="{Binding Path=Path}" Width="250"/>
+                        <GridViewColumn Header="Last Modified" DisplayMemberBinding="{Binding Path=LastModified, StringFormat='LOCALDATEFORMAT'}" Width="130"/>
+                        <GridViewColumn Header="Size (KB)" DisplayMemberBinding="{Binding Path=SizeKB}" Width="70"/>
+                    </GridView>
+                </ListView.View>
+            </ListView>
+        </Grid>
+        <Button x:Name="btnDataStoreFilePickerBack" Content="_Back" HorizontalAlignment="Right" Height="40" Margin="0,150,10,0" VerticalAlignment="Top" Width="65"/>
+        <Label Content="Path" HorizontalAlignment="Left" Height="36" Margin="32,23,0,0" VerticalAlignment="Top" Width="40"/>
+        <Label Content="Current" HorizontalAlignment="Left" Height="36" Margin="32,5,0,0" VerticalAlignment="Top" Width="55"/>
+        <Label x:Name="labelCurrentImage" Content="Label" HorizontalAlignment="Stretch" Height="29" Margin="87,5,0,0" VerticalAlignment="Top"/>
     </Grid>
 </Window>
 '@
@@ -585,7 +601,7 @@ Function Refresh-Form
     Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
 }
 
-Function Load-GUI
+Function New-Form
 {
     Param
     (
@@ -631,7 +647,7 @@ Function Set-Filters
         [string]$name
     )
 
-    $filtersForm = Load-GUI -inputXaml $filtersXAML
+    $filtersForm = New-Form -inputXaml $filtersXAML
     [bool]$result = $false
     if( $filtersForm )
     {
@@ -657,7 +673,7 @@ Function Set-Configuration
         $vm
     )
 
-    $reconfigureForm = Load-GUI -inputXaml $reconfigureXAML
+    $reconfigureForm = New-Form -inputXaml $reconfigureXAML
     [bool]$result = $false
     if( $reconfigureForm )
     {
@@ -828,7 +844,7 @@ Function Process-Snapshot
     }
     elseif( $Operation -eq 'TakeSnapShot' )
     {
-        $takeSnapshotForm = Load-GUI -inputXaml $takeSnapshotXAML
+        $takeSnapshotForm = New-Form -inputXaml $takeSnapshotXAML
         if( $takeSnapshotForm )
         {
             $takeSnapshotForm.Title += " of $($vm.name)"
@@ -995,7 +1011,7 @@ Function Process-Snapshot
 
 Function Show-DatastoresWindow
 {
-    $datastoresForm = Load-GUI -inputXaml $datastoresXAML
+    $datastoresForm = New-Form -inputXaml $datastoresXAML
 
     if( $datastoresForm )
     {
@@ -1021,7 +1037,7 @@ Function Show-DatastoresWindow
 
 Function Show-HostsWindow
 {
-    $hostsForm = Load-GUI -inputXaml $hostsXAML
+    $hostsForm = New-Form -inputXaml $hostsXAML
 
     if( $hostsForm )
     {
@@ -1070,7 +1086,7 @@ Function Show-SnapShotWindow
         [void][Windows.MessageBox]::Show( "No snapshots found for $($vm.name)" , 'Snapshot Management' , 'Ok' ,'Warning' )
     }
 
-    $snapshotsForm = Load-GUI -inputXaml $snapshotsXAML
+    $snapshotsForm = New-Form -inputXaml $snapshotsXAML
 
     [bool]$result = $false
     if( $snapshotsForm )
@@ -1160,6 +1176,158 @@ Function Show-SnapShotWindow
      }
 }
 
+Function Sort-Columns( $control )
+{
+    if( $view =  [Windows.Data.CollectionViewSource]::GetDefaultView($control.ItemsSource) )
+    {
+        [string]$direction = 'Ascending'
+        if(  $view.PSObject.Properties[ 'SortDescriptions' ] -and $view.SortDescriptions -and $view.SortDescriptions.Count -gt 0 )
+        {
+	        $sort = $view.SortDescriptions[0].Direction
+	        $direction = if( $sort -and 'Descending' -eq $sort){ 'Ascending' } else { 'Descending' }
+	        $view.SortDescriptions.Clear()
+        }
+
+        Try
+        {
+            [string]$column = $_.OriginalSource.Column.DisplayMemberBinding.Path.Path ## has to be name of the binding, not the header unless no binding
+            if( [string]::IsNullOrEmpty( $column ) )
+            {
+                $column = $_.OriginalSource.Column.Header
+            }
+	        $view.SortDescriptions.Add( ( New-Object ComponentModel.SortDescription( $column , $direction ) ) )
+        }
+        Catch
+        {
+        }
+    }
+}
+
+Function
+Set-FileInfoFromHTML
+{
+    [CmdletBinding()]
+
+    Param
+    (
+        [Parameter(Mandatory)]
+        [string]$uri ,
+        [Parameter(Mandatory)]
+        $response ,
+        [string]$parenthref 
+    )
+
+    ## build a hash table with last modified and size from the HTML returned
+    [hashtable]$linkInfo = @{}
+    if( $uri -match '\bdsName=' ) ## we've got a datastore now so can start to have files
+    {
+        $href = $null
+        $lastModified = $null
+        $fileSize = $null
+
+        $response.ParsedHtml.body.innerHTML -split "`r`n" | . { Process `
+        {
+            $line = $_
+            ## <TD><A href="/folder/GRL-APPVOLv2/GRL-APPVOLv2-05c98332.hlog?dcPath=Wakefield&amp;dsName=External%2520SSD">GRL-APPVOLv2-05c98332.hlog</A></TD>
+            if( $line -match '<A href="([^"]+)"' )
+            {
+                if( $parenthref -ne ( $matches[1] -replace '&amp;$' ))
+                {
+                    $href = $matches[1]
+                }
+            }
+            ## <TD align=right>09-Mar-2020 10:47</TD>
+            elseif( $href -and $line -match '<TD.*>(.*)</TD>' )
+            {
+                if( ! $lastModified )
+                {
+                    $lastModified = New-Object -TypeName DateTime
+                    if( ! [datetime]::TryParse( $matches[1] , [ref]$lastmodified ) )
+                    {
+                        $lastModified = $null
+                    }
+                }
+                else ## filesize
+                {
+                    $fileSize = $null
+                    [long]$checkConvert = -1
+                    if( [long]::TryParse( $matches[1] , [ref]$checkConvert ) -and $checkConvert -ge 0 )
+                    {
+                        $fileSize = $checkConvert
+                    }
+                    $linkInfo.Add( $href , ([pscustomobject]@{ 'LastModified' = $lastModified ; 'FileSize' = $filesize }) )
+                    $filesize = $href = $lastModified = $null
+                }
+            }
+        }}
+    }
+    $linkInfo
+}
+
+Function
+Get-FolderItems
+{
+    [CmdletBinding()]
+
+    Param
+    (
+        [string]$vCenter ,
+        $uri ,
+        $webSession ,
+        $parenthref 
+    )
+
+    Write-Verbose -Message "Get-FolderItems: uri $uri parenthref $parenthref"
+
+    Try
+    {
+        [string]$webRequestUri = $(if( $uri -match '^http' ) { $uri } else { "https://$vCenter$($uri -replace '&amp;' , '&' )" })
+
+        if( $response = Invoke-WebRequest -URI $webRequestUri -WebSession $webSession -Verbose:$false )
+        {
+            $linkInfo = Set-FileInfoFromHTML -uri $uri -parenthref $parenthref -response $response
+            
+            Write-Verbose -Message "Get-FolderItems: uri $uri parenthref $parenthref"
+
+            ForEach( $child in $response.Links )
+            {
+                $lastModified = $null
+                if( ( $info = $linkInfo[ $child.href ] ) -and $info.PSObject.Properties[ 'lastmodified' ] )
+                {
+                    $lastModified = New-Object -TypeName DateTime 
+                    $lastModified = $info.LastModified
+                }
+                if( $child.InnerText[-1] -eq '/' -or $uri -notmatch '\bdsName=' -or $child.InnerText -ceq 'Parent Directory' -or $child.InnerText -ceq 'Parent Datacenter' )
+                {
+                    ## it's a folder
+                    [pscustomobject]@{ 'Path' = "$($child.Innertext)" ; 'IsFile' = $false ; 'uri' = $child.href ; 'parent' = $uri ; 'LastModified' = $LastModified } 
+                }
+                elseif( $parenthref -ne ( $child.href -replace '&amp;$' ))
+                {
+                    Try
+                    {                    
+                        [pscustomobject]@{
+                            'Path' = "$($child.Innertext)"
+                            'IsFile' = $true
+                            'parent' = $uri
+                            'uri' = $child.href
+                            'LastModified' = $info.LastModified
+                            'SizeKB' = [math]::Round( ( [long]($info | Select-Object -ExpandProperty FileSize ) / 1KB ) ) }
+                    }
+                    Catch ## expected for "parent folder" as will not have a date
+                    {
+                        Write-Debug "Exception creating folder item for `"$($child.innertext)`""
+                    }
+                }
+            }
+        }
+    }
+    Catch
+    {
+        Write-Warning "Error for $webRequestUri`n$_"
+    }
+}
+
 Function Populate-DataStoreFileList
 {
     Param
@@ -1167,40 +1335,44 @@ Function Populate-DataStoreFileList
         [Parameter(Mandatory)]
         [string]$path ,
         [Parameter(Mandatory)]
+        [array]$items ,
+        [Parameter(Mandatory)]
         $control ,
-        $form ,
         $label ,
-        $filter
+        $filter ,
+        $parent
     )
     
-    $oldCursor = $form.Cursor
-    $form.Cursor = [Windows.Input.Cursors]::Wait
+    Write-Verbose -Message "Populate-DataStoreFileList: path $path parent $parent"
 
-    $dirErrors = $null
-    [array]$items = @( Get-ChildItem -Path $Path | Sort-Object -Property Name -ErrorVariable dirErrors )
+    ## need to use itemsource rather than items.add otherwise sort won't work
+    $control.Itemssource = @( $items.Where( { ! $_.IsFile -or [string]::IsNullOrEmpty( $filter ) -or $_.Path -like $filter } ) )
     
-    $form.Cursor = $oldCursor
-
-    if( ! $dirErrors -or ! $dirErrors.Count )
+    if( $label )
     {
-        $control.Items.Clear()
-        ## only put in .. if not root
-        if( $path -notmatch '^vmstore:\\[^\\]*$' )
+        [string]$absolutePath = $(if( $parent -match '^/folder(/.*)?\?dcPath=(.*)&.*\bdsName=(.*)$' )
         {
-            $null = $control.Items.Add( '..' )
+            '{0}/{1}/{2}' -f $Matches[2] , $Matches[3] , $Matches[1]
         }
-        $items | ForEach-Object `
+        elseif( $parent -match '^/folder\?dcPath=(.*)$' )
         {
-            if( $_.PSIsContainer -or ( ! [string]::IsNullOrEmpty( $filter ) -and $_.Name -like $filter ) )
-            {
-                $null = $control.Items.Add( $_.Name ) 
-            }
-        }
-        
-        if( $label )
+            $Matches[1]
+        })
+
+        [string]$leaf = $(if( $path -ceq 'Parent Directory' )
         {
-            $label.Content = $path
+            $absolutePath = $absolutePath -replace '/[^/]*$' ## need to remove the last element as we are moving up out of it
         }
+        elseif( $path -match '/folder$' )
+        {
+            '/'
+        }
+        else
+        {
+            $path
+        })
+
+        $label.Content = "$absolutePath/$leaf" -replace '%2f' , '/' -replace '%20' , ' ' -replace '%28' , '(' -replace '%29' , ')' -replace '//' , '/'
     }
 }
 
@@ -1210,24 +1382,20 @@ Function Show-DatastoreFileChooser
     (
         $vm ,
         $StartPath ,
-        $filter
+        $filter ,
+        $currentImage
     )
 
-    $result = $null
+    $returned = $null
 
-    if( $datastoreChooserForm = Load-GUI -inputXaml $cdXAMl )
+    ## we change the modification date format to be the locale format - probably a programmatic way of doing it but this works
+    if( $datastoreChooserForm = New-Form -inputXaml ( $cdXAMl -replace 'LOCALDATEFORMAT' , ( '{0} {1}' -f (Get-Culture).DateTimeFormat.ShortDatePattern , (Get-Culture).DateTimeFormat.ShortTimePattern )))
     {
-        if( [string]::IsNullOrEmpty( ( [string]$dataCentreName = Get-Datacenter -VM $vm | Select-Object -ExpandProperty Name ) ) )
-        {
-            Write-Error -Exception "Failed to get datacentre for vm $($vm.name)"
-            return
-        }
-
         $datastoreChooserForm.Title += " for $($vm.Name)"
 
         $WPFbtnDatastoreOK.Add_Click({
             $_.Handled = $true
-            if( ( $item = $WPFlistDatastore.SelectedItem ) -and ! ( $item -is [array] ) )
+            if( ( $item = $WPFlistviewDatastore.SelectedItem ) -and ! ( $item -is [array] ) )
             {
                 ## Check a single file is selected
                 $datastoreChooserForm.DialogResult = $true 
@@ -1238,64 +1406,121 @@ Function Show-DatastoreFileChooser
                 [void][Windows.MessageBox]::Show( "Must select exactly one file" , 'Datastore File Chooser' , 'Ok' ,'Warning' )
             }})
 
-        $WPFlistDatastore.add_MouseDoubleClick({
+        $WPFlistviewDatastore.add_MouseDoubleClick({
             $_.Handled = $true
-            if( $item = $WPFlistDatastore.SelectedItem )
+            if( $item = $WPFlistviewDatastore.SelectedItem )
             {
-                [string]$path = $(if( $item -eq '..' )
-                {
-                    Split-Path -Path $WPFlabelPath.Content -Parent
-                }
-                else
-                {
-                    Join-Path -Path $WPFlabelPath.Content -ChildPath $item
-                })
-                ## if selected item is a file then that is the one being selected
-                $oldCursor = $datastoreChooserForm.Cursor
-                $datastoreChooserForm.Cursor = [Windows.Input.Cursors]::Wait
-
-                $fileInfo = Get-ChildItem -Path $path -ErrorAction SilentlyContinue
-
-                $datastoreChooserForm.Cursor = $oldCursor
-
-                if( ! $fileInfo -or ! $fileInfo.PSIsContainer )
+                if( $item.IsFile )
                 {
                     $datastoreChooserForm.DialogResult = $true 
                     $datastoreChooserForm.Close()
                 }
                 else ## folder
                 {
-                    Populate-DataStoreFileList -path $path -control $WPFlistDatastore -label $WPFlabelPath -filter $filter -form $datastoreChooserForm
+                    [array]$items = @( Get-FolderItems -vCenter $global:DefaultVIServer -uri $item.uri -webSession $webSession -parenthref $item.parent )
+                    Populate-DataStoreFileList -path $item.path -control $WPFlistviewDatastore -label $WPFlabelPath -filter $filter -items $items -parent $item.parent
                 }
             }
         })
         
-        [string]$basePath = "vmstore:\$dataCentreName"
+        $WPFbtnDataStoreFilePickerBack.Add_Click({
+            if( ( $parent = $WPFlistviewDatastore.Items | Where-Object { $_.Path -ceq 'Parent Directory' -or $_.Path -ceq 'Parent Datacenter' } ) )
+            {
+                [array]$items = @( Get-FolderItems -vCenter $global:DefaultVIServer -uri $parent.uri -webSession $webSession -parenthref $parent.parent )
+                Populate-DataStoreFileList -path $parent.path -control $WPFlistviewDatastore -label $WPFlabelPath -filter $filter -items $items -parent $parent.parent
+            }
+        })
 
-        if( [string]::IsNullOrEmpty( $startPath ) )
+        $sortDatastoreFileChooserColumnsHandler = { Sort-Columns $_.Source }
+        if( $eventHandler = [Windows.RoutedEventHandler]$sortDatastoreFileChooserColumnsHandler )
         {
-            $startPath = $basePath
+            $WPFlistviewDatastore.AddHandler( [Windows.Controls.GridViewColumnHeader]::ClickEvent, $eventHandler )
         }
 
-        Populate-DataStoreFileList -path $StartPath -control $WPFlistDatastore -label $WPFlabelPath -filter $filter -form $datastoreChooserForm
+        $WPFlabelCurrentImage.Content = $currentImage
 
-        if( $datastoreChooserForm.ShowDialog() )
+        $webSession = $null
+        $result = $null
+        [string]$basePath = $(if( $startPath -match '^http' ) `
         {
-            ## Convert this path to a [Datastore] Path
-            if( $item = $WPFlistDatastore.SelectedItem )
+            $startPath
+        }
+        else
+        {
+            'https://{0}{1}' -f $global:DefaultVIServer.Name.ToString() , $(if( [string]::IsNullOrEmpty( $startPath ) ) { '/folder' } else { $StartPath } )
+        }) -replace '&amp;' , '&' 
+        
+        Try
+        {
+            [hashtable]$webrequestParams = @{ 'Uri' = $basePath ; 'SessionVariable' = 'websession' }
+            if( $credential )
             {
-                ## remove datastore and split first element as it is the datastore
-                [string[]]$pathElements = ((Join-Path -Path $WPFlabelPath.Content -ChildPath $item) -replace "^$([regex]::Escape( $basePath ))") -split '\\' , 3 | Select-Object -Last 2
-                if( $pathElements -and $pathElements.Count -eq 2 )
+                $webrequestParams.Add( 'Credential' , $credential )
+            }
+            else
+            {
+                $webrequestParams.Add( 'UseDefaultCredentials' , $true )
+            }
+            $result = Invoke-WebRequest @webrequestParams
+        }
+        Catch
+        {
+            ## if unauthorised, prompt for credentials
+            if( $_.ToString() -match '\(401\)' `
+                -and ( $credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) )
+            {
+                $webrequestParams.Credential = $credential
+                $webrequestParams.Remove( 'UseDefaultCredentials' )
+                $result = Invoke-WebRequest @webrequestParams
+            }
+            else
+            {
+                Write-Warning -Message "Failed to get $basePath : $_"
+            }
+        }
+
+        if( $result -and $result.Links )
+        {
+            ##$linkInfo = Set-FileInfoFromHTML -uri $basePath -response $result
+
+            [array]$results = @( $(if( $global:lastDatastoreFolder )
                 {
-                    ## Set-CDDrive will take / or \ but changing them means we can compare paths after mount to see if has succeeded
-                    $result = "[{0}] {1}" -f $pathElements[0] , $pathElements[1] -replace '\\' , '/'
+                    Get-FolderItems -vCenter $global:DefaultVIServer -uri $basePath -webSession $webSession
+                }
+                else ## first time here so must be top level
+                {
+                    ForEach( $link in $result.Links )
+                    {
+                        Get-FolderItems -vCenter $global:DefaultVIServer -uri $link.href -webSession $webSession
+                    }
+                }) )
+
+            if( $results -and $results.Count )
+            {
+                Populate-DataStoreFileList -path $basePath -control $WPFlistviewDatastore -label $WPFlabelPath -filter $filter -items $results -parent $null
+
+                if( $datastoreChooserForm.ShowDialog() -and ( $item = $WPFlistviewDatastore.SelectedItem ))
+                {
+                    ## Convert this path to a [Datastore] Path
+                    ## /folder/ISO/winpe.uefi.iso?dcPath=Wakefield&amp;dsName=GRL-NAS02 
+                    if( $item.uri -match '/folder/(.*)\?dcPath=.*dsName=(.*)$' )
+                    {
+                        $returned = "[{0}] {1}" -f $matches[2] , ( $matches[1] -replace '%2f' , '/' -replace '%2520' , ' ' -replace '%20' , ' ' )
+                        $global:lastDatastoreFolder = $item.parent
+                    }
+                    else
+                    {
+                        [Windows.MessageBox]::Show( "Failed to get file details from $($item.uri)" , "CD Mount Error" , 'Ok' ,'Error' )
+                    }
                 }
             }
-            $global:lastDatastoreFolder = $WPFlabelPath.Content
+        }
+        else
+        {
+            [Windows.MessageBox]::Show( "Failed to get data from $basePath" , "CD Mount Error" , 'Ok' ,'Error' )
         }
     }
-    $result
+    $returned
 }
 
 
@@ -1352,7 +1577,7 @@ Function Process-ScriptResults
     }
     elseif( $scriptDetails.Output -eq 'window' )
     {
-        if( $textOutputForm = Load-GUI -inputXaml $textOutputXAML )
+        if( $textOutputForm = New-Form -inputXaml $textOutputXAML )
         {
             $textOutputForm.Title = $message
             $WPFtxtTextOutput.TextWrapping = 'NoWrap'
@@ -1397,6 +1622,70 @@ Function Process-ScriptResults
     }
 }
 
+
+<#
+.SYNOPSIS
+
+Convert path in either PS provider format ("vmstore:\") or 
+
+.DESCRIPTION
+
+Uses VMware PowerCLI. Permissions to perform actions will be as per the permissions defined for the account used to connect to VMware as defined in vSphere/ESXi
+
+.PARAMETER path
+
+Path to convert
+
+.PARAMETER vCenter
+
+The vCenter being used
+
+.PARAMETER datacenter
+
+The datacenter being used
+#>
+
+Function
+ConvertTo-VMwareFolderPath
+{
+    [CmdLetBinding()]
+
+    Param
+    (
+        [Parameter(Mandatory)]
+        [string]$path ,
+        [Parameter(Mandatory)]
+        [string]$vcenter ,
+        [string]$datacenter
+    )
+
+    [string]$result = $null
+
+    ## [SSD Ortial] W10 Insider 19041/W10 Insider 19041-14.png
+    ## https://grl-vcenter/folder/W10%20Insider%2019041/W10%20Insider%2019041-14.png?dcPath=Wakefield&dsName=SSD%2520Ortial
+    if( $path -match '^\[([^\]]+)\]\s*(.*)$' )
+    {
+        if( $PSBoundParameters[ 'datacenter' ] )
+        {
+            $result = "https://$vcenter/folder/$($matches[2])?dcPath=$datacenter&dsName=$($matches[1] -replace '\s' , '%2520' )" -replace '\s' , '%20'
+        }
+        else
+        {
+            Write-Warning -Message "No datacenter passed to convert path `"$path`""
+        }
+    }
+    ## vmstore:/Wakefield/SSD Ortial/W10 Insider 19041/W10 Insider 19041-16.png
+    elseif( $path -match '^vmstore:/([^/]+)/([^/]+)/(.*)$' )
+    {
+        $result = "https://$vcenter/folder/$($matches[3])?dcPath=$($matches[1])&dsName=$($matches[2] -replace '\s' , '%2520' )" -replace '\s' , '%20'
+    }
+    else
+    {
+        Write-Warning "Could not find [datastore] in path `"$path`""
+    }
+    $result
+}
+
 Function Process-Action
 {
     Param
@@ -1428,6 +1717,7 @@ Function Process-Action
     [int]$loopIterations = 0
     $scriptResults = New-Object -TypeName System.Collections.Generic.List[psobject]
     [int]$scriptsRun = 0
+    [string]$cdfile = $null 
 
     ForEach( $selectedVM in $selectedVMs )
     {
@@ -1468,7 +1758,7 @@ Function Process-Action
             {
                 if( ! $scriptDetails.Path )
                 {
-                    if( $runScriptForm = Load-GUI -inputXaml $runScriptXAML )
+                    if( $runScriptForm = New-Form -inputXaml $runScriptXAML )
                     {
                         $WPFbtnRunScriptOK.Add_Click({
                             $_.Handled = $true
@@ -1725,7 +2015,7 @@ Function Process-Action
             {
                 ## http://www.simonlong.co.uk/blog/2010/05/05/powercli-a-simple-vm-backup-script/
                 
-                $backupForm = Load-GUI -inputXaml $backupXAML
+                $backupForm = New-Form -inputXaml $backupXAML
 
                 if( $backupForm )
                 {
@@ -1910,12 +2200,12 @@ Function Process-Action
             {
                 if( $cddrive = Get-CDDrive -VM $vm -ErrorAction SilentlyContinue )
                 {
-                    if( $file = Show-DatastoreFileChooser -VM $vm -StartPath $global:lastDatastoreFolder -filter '*.iso' )
+                    if( $cdfile -or ( $cdfile = Show-DatastoreFileChooser -VM $vm -StartPath $global:lastDatastoreFolder -filter '*.iso' -currentImage $cddrive.IsoPath ) )
                     {
-                        Write-Verbose -Message "Mounting `"$file`" to $($vm.name)"
-                        if( ! ( $mounted = $cddrive | Set-CDDrive -IsoPath $file -Confirm:$false -Connected $true )-or $mounted.IsoPath -ne $file )
+                        Write-Verbose -Message "Mounting `"$cdfile`" to $($vm.name)"
+                        if( ! ( $mounted = $cddrive | Set-CDDrive -IsoPath $cdfile -Confirm:$false -Connected $true )-or $mounted.IsoPath -ne $cdfile )
                         {
-                            [void][Windows.MessageBox]::Show( "Error mounting `"$file`" in $($vm.Name)" , 'CD Mount Error' , 'Ok' ,'Exclamation' )
+                            [void][Windows.MessageBox]::Show( "Error mounting `"$cdfile`" in $($vm.Name)" , 'CD Mount Error' , 'Ok' ,'Exclamation' )
                         }
                     }
                 }
@@ -2106,15 +2396,59 @@ Function Process-Action
                 if( $shot )
                 {
                     $datacenter = Get-DataCenter -VM $vm
-                    [string]$sourceFile = "vmstore:/$($datacenter.name)/$($shot -replace '\[' -replace '\]\s*' , '/')"
+                    ## PS provider format path so we can delete the file if required
+                    [string]$global:sourceFile = "vmstore:/$($datacenter.name)/$($shot -replace '\[' -replace '\]\s*' , '/')"
+                    [string]$sourceFileViaFolder = ConvertTo-VMwareFolderPath -path $shot -datacenter $datacenter.name -vcenter $global:DefaultVIServer.Name
                     if( ! [string]::IsNullOrEmpty( $screenShotFolder ) -and ! ( Test-Path -Path $screenShotFolder -ErrorAction SilentlyContinue -PathType Container ) )
                     {
                         $null = New-Item -Path $screenShotFolder -ItemType Directory
                     }
                     [string]$localfile = Join-Path -Path $( if( ! [string]::IsNullOrEmpty( $screenShotFolder ) ) { $screenShotFolder } else { $env:temp }) -ChildPath "$(Get-Date -Format 'HHmmss-ddMMyy')-$(Split-Path -Path $shot -Leaf)"
-                    if( ( $copied = Copy-DatastoreItem -Item $sourceFile -Destination $localFile -PassThru ) )
+                    
+                    ## try and get the file through the /folder interface as much quicker than PS drive
+                    $copied = $null
+                    if( $sourceFileViaFolder )
                     {
-                        if( $screenshotWindow = Load-GUI -inputXaml $screenshotXAML )
+                        Try
+                        {
+                            [hashtable]$webrequestParams = @{ 'Uri' = $sourceFileViaFolder ; 'OutFile' = $localfile }
+                            if( $credential )
+                            {
+                                $webrequestParams.Add( 'Credential' , $credential )
+                            }
+                            else
+                            {
+                                $webrequestParams.Add( 'UseDefaultCredentials' , $true )
+                            }
+                            if( Invoke-WebRequest @webrequestParams -PassThru )
+                            {
+                                $copied = Get-ItemProperty -Path $localfile
+                            }
+                        }
+                        Catch
+                        {
+                            ## if unauthorised, prompt for credentials
+                            if( $_.ToString() -match '\(401\)' `
+                                -and ( $credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) `
+                                    -and ( Invoke-WebRequest -Uri $sourceFileViaFolder -OutFile $localfile -Credential $credential -PassThru ) ) ## cannot reuse hashtable incase bad credential in there already
+                            {
+                                $copied = Get-ItemProperty -Path $localfile
+                            }
+                            else
+                            {
+                                Write-Warning -Message "Failed to get $sourceFileViaFolder : $_"
+                            }
+                        }
+                    }
+                    
+                    if( ! $copied )
+                    {
+                        $copied = Copy-DatastoreItem -Item $global:sourceFile -Destination $localFile -PassThru
+                    }
+
+                    if( $copied )
+                    {
+                        if( $screenshotWindow = New-Form -inputXaml $screenshotXAML )
                         {
                             if( $filestream = New-Object System.IO.FileStream -ArgumentList $copied.FullName , Open , Read )
                             {
@@ -2124,6 +2458,14 @@ Function Process-Action
                                 $bitmap.EndInit()
                                 $wpfimgScreenshot.Source = $bitmap
                                 $screenshotWindow.Title = "Screenshot of $($vm.Name) at $(Get-Date -Date $snapshotTime)"
+                                $WPFbtnDeleteScreenShot.Add_Click({
+                                    $_.Handled = $true
+                                    if( $global:sourceFile ) ## /folder interface is read only so have to go via PS drive
+                                    {
+                                        Write-Verbose -Message "Deleting screenshot file `"$global:sourceFile`""
+                                        Remove-Item -Path $global:sourceFile -Force
+                                    }
+                                })
                                 $screenshotWindow.Show()
                                 $bitmap.StreamSource = $null
                                 $filestream.Close()
@@ -2147,7 +2489,7 @@ Function Process-Action
                 }
                 else
                 {
-                    [void][Windows.MessageBox]::Show( "Failed to create console snapshot of $($vm.Name)" , 'Snapshot Error' , 'Ok' ,'Exclamation' )
+                    [void][Windows.MessageBox]::Show( "Failed to create console screenshot of $($vm.Name)" , 'Screenshot Error' , 'Ok' ,'Exclamation' )
                 }
             }
             elseif( $Operation -eq 'Snapshots' )
@@ -2542,7 +2884,7 @@ if( ! $ipV6 )
 
 Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase,System.Windows.Forms
 
-$mainForm = Load-GUI -inputXaml $mainwindowXAML
+$mainForm = New-Form -inputXaml $mainwindowXAML
 
 if( ! $mainForm )
 {
@@ -2671,6 +3013,22 @@ $mainForm.add_KeyDown({
 
 $global:scriptHistory = Get-ItemProperty -Path $regKey -Name 'Scripts' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Scripts
 $global:scriptArgumentsHistory = Get-ItemProperty -Path $regKey -Name 'ScriptArguments' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ScriptArguments
+
+## in case we have certificate problems - probably should check first for better security !
+
+##https://stackoverflow.com/questions/41897114/unexpected-error-occurred-running-a-simple-unauthorized-rest-query?rq=1
+Add-Type -TypeDefinition @'
+public class SSLHandler
+{
+    public static System.Net.Security.RemoteCertificateValidationCallback GetSSLHandler()
+    {
+        return new System.Net.Security.RemoteCertificateValidationCallback((sender, certificate, chain, policyErrors) => { return true; });
+    }
+}
+'@
+
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = [SSLHandler]::GetSSLHandler()
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
 $result = $mainForm.ShowDialog()
 
