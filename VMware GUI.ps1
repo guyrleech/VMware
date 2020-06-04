@@ -39,6 +39,9 @@
     @guyrleech 16/05/2020  Changed screenshot copy file code to use /folder web method & added Delete screenshot button
     @guyrleech 18/05/2020  Changed CD mount datastore file browser to use /folder method, fixed multiple datastore prompts when select mount CD on multiple machines
     @guyrleech 20/05/2020  Added Back button to datstore browser, rejigged datastore file picker to be resizeable, sort columns and put dates in locale format
+    @guyrleech 01/06/2020  Busy cursor on delete screenshot as can take a while
+    @guyrleech 03/06/2020  Disable delete screenshot button after successful delete
+    @guyrleech 04/06/2020  Changed mstsc(new) to mstsc(custom)
 #>
 
 <#
@@ -228,6 +231,9 @@ $pinvokeCode = @'
 [string]$global:lastDatastoreFolder = $null
 [array]$global:scriptHistory = @()
 [array]$global:scriptArgumentsHistory = @()
+[string]$global:mstscWidth = $null
+[string]$global:mstscHeight = $null
+
 [System.Management.Automation.PSCredential]$global:lastCredential = $null
 
 #region XAML
@@ -252,7 +258,7 @@ $pinvokeCode = @'
                     <MenuItem Header="_Console" x:Name="ConsoleContextMenu" />
                     <MenuItem Header="_Run" x:Name="RunScriptContextMenu" />
                     <MenuItem Header="_Mstsc" x:Name="MstscContextMenu" />
-                    <MenuItem Header="Mstsc (New)" x:Name="MstscNewContextMenu" />
+                    <MenuItem Header="Mstsc (Custom)" x:Name="MstscNewContextMenu" />
                     <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
                     <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
@@ -291,6 +297,44 @@ $pinvokeCode = @'
         Title="Text_Output" Height="450" Width="800">
     <Grid>
         <TextBox x:Name="txtTextOutput" HorizontalAlignment="Stretch" Margin="24,16,0,0" TextWrapping="NoWrap" VerticalAlignment="Stretch" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" AllowDrop="False" FontFamily="Consolas"/>
+    </Grid>
+</Window>
+'@
+
+[string]$mstscXAML = @'
+<Window x:Class="VMWare_GUI.MSTSC"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="MSTSC" Height="450" Width="800">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="67*"/>
+            <ColumnDefinition Width="725*"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="txtboxMstscWidth" HorizontalAlignment="Left" Height="25" Margin="126,70,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="245" Grid.Column="1"/>
+        <TextBox x:Name="txtboxMstscHeight" HorizontalAlignment="Left" Height="25" Margin="126,143,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="245" Grid.Column="1"/>
+        <Label Content="Width" HorizontalAlignment="Left" Height="35" Margin="0,70,0,0" VerticalAlignment="Top" Width="126" Grid.Column="1"/>
+        <Label Content="Height" HorizontalAlignment="Left" Height="35" Margin="0,143,0,0" VerticalAlignment="Top" Width="126" Grid.Column="1"/>
+        <Grid Margin="126,197,332,53" Grid.Column="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="214*"/>
+                <ColumnDefinition Width="53*"/>
+            </Grid.ColumnDefinitions>
+            <CheckBox x:Name="chkboxMultimon" Content="_Multi Monitor" HorizontalAlignment="Left" Height="28" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxSpan" Content="_Span" HorizontalAlignment="Left" Height="28" Margin="0,29,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxAdmin" Content="_Admin" HorizontalAlignment="Left" Height="28" Margin="0,57,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxPublic" Content="_Public" HorizontalAlignment="Left" Height="28" Margin="0,85,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxRemoteGuard" Content="Remote _Guard" HorizontalAlignment="Left" Height="28" Margin="0,113,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxRestrictedAdmin" Content="_Restricted Admin" HorizontalAlignment="Left" Height="28" Margin="0,141,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+
+        </Grid>
+        <Button x:Name="btnConnect" Grid.ColumnSpan="2" Content="Connect" HorizontalAlignment="Left" Height="43" Margin="41,366,0,0" VerticalAlignment="Top" Width="134" IsDefault="True"/>
+        <Button x:Name="btnCancel" Content="Cancel" HorizontalAlignment="Left" Height="43" Margin="286,366,0,0" VerticalAlignment="Top" Width="134" Grid.Column="1" IsCancel="True"/>
+
     </Grid>
 </Window>
 '@
@@ -356,7 +400,7 @@ $pinvokeCode = @'
         Title="Screenshot" Height="700" Width="950">
     <Grid>
         <Image x:Name="imgScreenshot" Margin="20,20,20,83"/>
-        <Button x:Name="btnDeleteScreenShot" Content="_Delete Snapshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Top" Width="187"/>
+        <Button x:Name="btnDeleteScreenShot" Content="_Delete Screenshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Top" Width="187"/>
     </Grid>
 </Window>
 '@
@@ -2152,12 +2196,10 @@ Function Process-Action
                     if( ! $noReuseMstsc -and $Operation -ne 'MstscNew' )
                     {
                         ## see if we have a running mstsc for this host already so we can restore and bring to foreground
-                        $mstscProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'mstsc.exe' and ParentProcessId = '$pid'" | Where-Object CommandLine -match "/v:$address\b" | Sort-Object -Property CreationDate -Descending | Select-Object -First 1
-                        if( $mstscProcess )
+                        if( $mstscProcess = Get-CimInstance -ClassName win32_Process -Filter "Name = 'mstsc.exe' and ParentProcessId = '$pid'" | Where-Object CommandLine -match "/v:$address\b" | Sort-Object -Property CreationDate -Descending | Select-Object -First 1 )
                         {
                             Write-Verbose "Found existing mstsc process pid $($mstscProcess.ProcessId) for $address"
-                            $windowHandle = Get-Process -Id $mstscProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle
-                            if( $windowHandle )
+                            if( $windowHandle = Get-Process -Id $mstscProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle )
                             {
                                 [bool]$setForegroundWindow = [win32.user32]::ShowWindowAsync( $windowHandle , 9 ) ## restore
                                 if( ! $setForegroundWindow )
@@ -2170,6 +2212,63 @@ Function Process-Action
 
                     if( ! $setForegroundWindow )
                     {
+                        [string]$customOptions = $null
+
+                        if( $Operation -eq 'MstscNew' )
+                        {
+                            if( $mstscForm = New-Form -inputXaml $mstscXAML )
+                            {
+                                $WPFtxtboxMstscWidth.Text = $global:mstscWidth
+                                $WPFtxtboxMstscHeight.Text = $global:mstscHeight
+
+                                $WPFbtnConnect.Add_Click({
+                                    $_.Handled = $true
+                                    $mstscForm.DialogResult = $true 
+                                    $mstscForm.Close() })
+                                if( $mstscForm.ShowDialog() )
+                                {
+                                    if( ![string]::IsNullOrEmpty( $WPFtxtboxMstscWidth.Text ) )
+                                    {
+                                        $customOptions += ( " /w:{0}" -f $WPFtxtboxMstscWidth.Text )
+                                        $global:mstscWidth = $WPFtxtboxMstscWidth.Text
+                                    }
+                                    if( ![string]::IsNullOrEmpty( $WPFtxtboxMstscHeight.Text ) )
+                                    {
+                                        $customOptions += ( " /h:{0}" -f $WPFtxtboxMstscHeight.Text )
+                                        $global:mstscHeight = $WPFtxtboxMstscHeight.Text
+                                    }
+                                    if( $WPFchkboxMultimon.IsChecked )
+                                    {
+                                        $customOptions += ' /multimon'
+                                    }
+                                    if( $WPFchkboxSpan.IsChecked )
+                                    {
+                                        $customOptions += ' /span'
+                                    }
+                                    if( $WPFchkboxAdmin.IsChecked )
+                                    {
+                                        $customOptions += ' /admin'
+                                    }
+                                    if( $WPFchkboxPublic.IsChecked )
+                                    {
+                                        $customOptions += ' /public'
+                                    }
+                                    if( $WPFchkboxRemoteGuard.IsChecked )
+                                    {
+                                        $customOptions += ' /remoteGuard'
+                                    }
+                                    if( $WPFchkboxRestrictedAdmin.IsChecked )
+                                    {
+                                        $customOptions += ' /restrictedAdmin'
+                                    }
+                                }
+                                else # cancelled
+                                {
+                                    return
+                                }
+                            }
+                        }
+
                         ## See if we have a stored credential for this and if so only create .rdp file if extraRDPSettings set
                         [string]$storedCredential = cmdkey.exe /list:TERMSRV/$address | Where-Object { $_ -match 'User:' }
                         [string]$thisRdpFileName = $rdpFileName
@@ -2182,7 +2281,7 @@ Function Process-Action
                         [string]$arguments = "$thisRdpFileName /v:$($address):$rdpPort"
                         if( ! [string]::IsNullOrEmpty( $mstscParams ))
                         {
-                            $arguments += " $mstscParams"
+                            $arguments += " $mstscParams $customOptions"
                         }
                         $mstscProcess = Start-Process -FilePath 'mstsc.exe' -ArgumentList $arguments -PassThru
                         if( ! $mstscProcess )
@@ -2463,7 +2562,15 @@ Function Process-Action
                                     if( $global:sourceFile ) ## /folder interface is read only so have to go via PS drive
                                     {
                                         Write-Verbose -Message "Deleting screenshot file `"$global:sourceFile`""
-                                        Remove-Item -Path $global:sourceFile -Force
+                                        $oldCursor = $_.Source.Parent.Cursor
+                                        $_.Source.Parent.Cursor = [Windows.Input.Cursors]::Wait
+                                        $errorDetails = $null
+                                        Remove-Item -Path $global:sourceFile -Force -ErrorVariable errorDetails
+                                        $_.Source.Parent.Cursor = $oldCursor
+                                        if( ! $errorDetails )
+                                        {
+                                            $_.source.IsEnabled = $false ## disable delete button since succeeded
+                                        }
                                     }
                                 })
                                 $screenshotWindow.Show()
