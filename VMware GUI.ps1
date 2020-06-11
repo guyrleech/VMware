@@ -42,6 +42,7 @@
     @guyrleech 01/06/2020  Busy cursor on delete screenshot as can take a while
     @guyrleech 03/06/2020  Disable delete screenshot button after successful delete
     @guyrleech 04/06/2020  Changed mstsc(new) to mstsc(custom)
+    @guyrleech 11/06/2020  Added -EnableNetworkAccess when running commands if path starts with \\ and "Network Access" check box in run dialogue
 #>
 
 <#
@@ -373,8 +374,8 @@ $pinvokeCode = @'
         <Button x:Name="brnRunScriptFileChooser" Content="..." HorizontalAlignment="Left" Height="33" Margin="633,31,0,0" VerticalAlignment="Top" Width="53"/>
         <Grid Margin="12,148,568,214">
             <Label Content="Location" HorizontalAlignment="Left" Height="26" VerticalAlignment="Top" Width="86"/>
-            <RadioButton x:Name="radioLocalToVM" Content="_Local to VM" HorizontalAlignment="Left" Height="26" Margin="115,6,0,0" VerticalAlignment="Top" Width="97" GroupName="Location"/>
-            <RadioButton x:Name="radioCopyToVM" Content="_Copy to VM" HorizontalAlignment="Left" Height="26" Margin="115,31,0,0" VerticalAlignment="Top" Width="97" GroupName="Location" IsChecked="True"/>
+            <RadioButton x:Name="radioLocalToVM" Content="_Local to VM" HorizontalAlignment="Left" Height="26" Margin="115,6,0,0" VerticalAlignment="Top" Width="97" GroupName="Location" IsChecked="True"/>
+            <RadioButton x:Name="radioCopyToVM" Content="_Copy to VM" HorizontalAlignment="Left" Height="26" Margin="115,31,0,0" VerticalAlignment="Top" Width="97" GroupName="Location"/>
 
         </Grid>
         <CheckBox x:Name="chkRunScriptUseSSL" Content="_Use SSL" HorizontalAlignment="Left" Height="16" Margin="275,211,0,0" VerticalAlignment="Top" Width="82"/>
@@ -384,6 +385,7 @@ $pinvokeCode = @'
         <ComboBox x:Name="comboScriptName" HorizontalAlignment="Left" Height="33" Margin="127,31,0,0" VerticalAlignment="Top" Width="480" AllowDrop="True" IsEditable="True"/>
         <ComboBox x:Name="comboScriptArguments" HorizontalAlignment="Left" Height="36" Margin="127,93,0,0" VerticalAlignment="Top" Width="480" IsEditable="True"/>
         <CheckBox x:Name="chkRunScriptModal" Content="_Modal" HorizontalAlignment="Left" Height="16" Margin="563,211,0,0" VerticalAlignment="Top" Width="154"/>
+        <CheckBox x:Name="chkRunScriptNetworkAccess" Content="_Network Access" HorizontalAlignment="Left" Height="16" Margin="563,239,0,0" VerticalAlignment="Top" Width="154"/>
 
     </Grid>
 </Window>
@@ -1879,6 +1881,7 @@ Function Process-Action
                             $scriptDetails.Invocation = $(if( $WPFradioVmwareTools.IsChecked ) { 'VMwareTools' } else { 'WinRM' })
                             $scriptDetails.Concatenate = $(if( $WPFchkRunScriptConcatenate.IsChecked ) { 'Yes' } else { 'No' })
                             $scriptDetails.Modal = $(if( $WPFchkRunScriptModal.IsChecked ) { 'Yes' } else { 'No' })
+                            $scriptDetails.NetworkAccess = $WPFchkRunScriptNetworkAccess.IsChecked
                             ## save file and argument list for next time
                             $global:scriptHistory = $wpfcomboScriptName.Items.Clone()
                             if( $WPFcomboScriptArguments.Items -and $WPFcomboScriptArguments.Items.Count )
@@ -1908,7 +1911,7 @@ Function Process-Action
                         $global:lastCredential = $null
                     }
 
-                    if( $WPFchkRunScriptCredentials.IsChecked )
+                    if( $WPFchkRunScriptCredentials.IsChecked -or $scriptDetails.NetworkAccess -or $scriptDetails.Path -match '^"?\\\\' )
                     {
                         if( ! ( $newCredential = $global:lastCredential ))
                         {
@@ -1993,20 +1996,34 @@ Function Process-Action
 
                         if( $scriptDetails.Invocation -eq 'WinRM' )
                         {
-                            ## seems that Invoke-Command can't take named parameters so we have to resort to this and chear by using csv format to give a grid view
+                            ## seems that Invoke-Command can't take named parameters so we have to resort to this and cheat by using csv format to give a grid view
                             ## Don't quote file as may just be a cmdlet
                             [string]$scriptArguments = $scriptDetails.Arguments
+                            $remotingError = $null
                             [hashtable]$invokeCommandArguments = @{
                                 'ComputerName' = $vm.Guest.HostName
                                 'UseSSL' = $WPFchkRunScriptUseSSL.IsChecked
+                                'ErrorVariable' = 'remotingError'
                             }
                             if( $newCredential )
                             {
                                 $invokeCommandArguments.Add( 'Credential' , $newCredential )
                             }
                         
+                            if( $localScriptToRun -match '^"?\\\\' -or $scriptDetails.NetworkAccess )
+                            {
+                                $invokeCommandArguments.Add( 'EnableNetworkAccess' , $true )
+                                if( $newCredential )
+                                {
+                                    $invokeCommandArguments.Add( 'Authentication' , 'CredSSP' )
+                                }
+                            }
+
                             Write-Verbose "$(Get-Date -Format G): running `"$localScriptToRun`" on $($vm.name)"
-                            $result = Invoke-Command -ScriptBlock { Invoke-Expression -Command "& $using:localScriptToRun $using:scriptArguments" } @invokeCommandArguments
+                            if( ! ( $result = Invoke-Command -ScriptBlock { Invoke-Expression -Command "& $using:localScriptToRun $using:scriptArguments" } @invokeCommandArguments ) -and ($remotingError | Select-Object -First 1 -ExpandProperty Exception -EA SilentlyContinue | Where-Object -Property Message -Match 'WinRM cannot process the request' ))
+                            {
+                                Write-Warning -Message "Check remoting setup correctly at both ends as per http://www.mobzystems.com/blog/configuring-powershell-remoting-with-network-access/ and tick `"Network Access`" check box"
+                            }
                         }
                         else ## execute via VMware tools
                         {
