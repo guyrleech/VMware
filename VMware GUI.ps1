@@ -43,6 +43,7 @@
     @guyrleech 03/06/2020  Disable delete screenshot button after successful delete
     @guyrleech 04/06/2020  Changed mstsc(new) to mstsc(custom)
     @guyrleech 11/06/2020  Added -EnableNetworkAccess when running commands if path starts with \\ and "Network Access" check box in run dialogue
+    @guyrleech 18/06/2020  Bug fix for custom mstsc as was still passing existing non-custom parameters
 #>
 
 <#
@@ -177,7 +178,7 @@ Param
     [string]$vmName = '*' ,
     [int]$rdpPort = 3389 ,
     [string]$mstscParams ,
-    [ValidateSet('mstsc','console','PowerOn','reconfigure','snapshots','Delete','backup','ConnectCD','DisconnectCD','UpdateTools','RunScript','Events','MstscNew','LatestSnapshotRevert','ScreenShot')]
+    [ValidateSet('mstsc','MstscNew','console','PowerOn','reconfigure','snapshots','Delete','backup','ConnectCD','DisconnectCD','UpdateTools','RunScript','Events','MstscNew','LatestSnapshotRevert','ScreenShot')]
     [string]$doubleClick = 'mstsc',
     [switch]$saveCredentials ,
     [switch]$ipv6 ,
@@ -2296,12 +2297,15 @@ Function Process-Action
                         }
                         Write-Verbose "Launching mstsc to $address"
                         [string]$arguments = "$thisRdpFileName /v:$($address):$rdpPort"
-                        if( ! [string]::IsNullOrEmpty( $mstscParams ))
+                        if( ! [string]::IsNullOrEmpty( $customOptions ))
                         {
-                            $arguments += " $mstscParams $customOptions"
+                            $arguments += " $customOptions"
                         }
-                        $mstscProcess = Start-Process -FilePath 'mstsc.exe' -ArgumentList $arguments -PassThru
-                        if( ! $mstscProcess )
+                        elseif( ! [string]::IsNullOrEmpty( $mstscParams ))
+                        {
+                            $arguments += " $mstscParams"
+                        }
+                        if( ! ( $mstscProcess = Start-Process -FilePath 'mstsc.exe' -ArgumentList $arguments -PassThru ) )
                         {
                             Write-Error -Message "Failed to run mstsc.exe"
                         }
