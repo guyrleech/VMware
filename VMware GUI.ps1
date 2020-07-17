@@ -44,6 +44,8 @@
     @guyrleech 04/06/2020  Changed mstsc(new) to mstsc(custom)
     @guyrleech 11/06/2020  Added -EnableNetworkAccess when running commands if path starts with \\ and "Network Access" check box in run dialogue
     @guyrleech 18/06/2020  Bug fix for custom mstsc as was still passing existing non-custom parameters
+    @guyrleech 16/07/2020  Added connection version and build details to title
+    @guyrleech 17/07/2020  Added Copy to Clipboard button/function to screenshot window
 #>
 
 <#
@@ -235,8 +237,8 @@ $pinvokeCode = @'
 [array]$global:scriptArgumentsHistory = @()
 [string]$global:mstscWidth = $null
 [string]$global:mstscHeight = $null
-
 [System.Management.Automation.PSCredential]$global:lastCredential = $null
+$global:copied = $null
 
 #region XAML
 [string]$mainwindowXAML = @'
@@ -403,7 +405,9 @@ $pinvokeCode = @'
         Title="Screenshot" Height="700" Width="950">
     <Grid>
         <Image x:Name="imgScreenshot" Margin="20,20,20,83"/>
-        <Button x:Name="btnDeleteScreenShot" Content="_Delete Screenshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Top" Width="187"/>
+        <Button x:Name="btnDeleteScreenShot" Content="_Delete Snapshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Top" Width="187"/>
+        <Button x:Name="btnScreenShotToClipboard" Content="_Copy To Clipboard" HorizontalAlignment="Left" Height="45" Margin="236,603,0,0" VerticalAlignment="Top" Width="187"/>
+
     </Grid>
 </Window>
 '@
@@ -699,6 +703,7 @@ Function Set-Filters
     if( $filtersForm )
     {
         $WPFtxtVMName.Text = $name
+        $WPFtxtVMName.Focus()
         $wpfchkPoweredOn.IsChecked = $showPoweredOn
         $wpfchkPoweredOff.IsChecked = $showPoweredOff
         $wpfchkSuspended.IsChecked = $showSuspended
@@ -1872,6 +1877,8 @@ Function Process-Action
                         {
                             ($global:scriptArgumentsHistory).ForEach( { $WPFcomboScriptArguments.Items.Add( $_ ) } )
                         }
+                        
+                        $WPFcomboScriptName.Focus()
 
                         if( $runScriptForm.ShowDialog() )
                         {
@@ -2236,6 +2243,7 @@ Function Process-Action
                         {
                             if( $mstscForm = New-Form -inputXaml $mstscXAML )
                             {
+                                $WPFtxtboxMstscWidth.Focus()
                                 $WPFtxtboxMstscWidth.Text = $global:mstscWidth
                                 $WPFtxtboxMstscHeight.Text = $global:mstscHeight
 
@@ -2526,7 +2534,7 @@ Function Process-Action
                     [string]$localfile = Join-Path -Path $( if( ! [string]::IsNullOrEmpty( $screenShotFolder ) ) { $screenShotFolder } else { $env:temp }) -ChildPath "$(Get-Date -Format 'HHmmss-ddMMyy')-$(Split-Path -Path $shot -Leaf)"
                     
                     ## try and get the file through the /folder interface as much quicker than PS drive
-                    $copied = $null
+                    $global:copied = $null
                     if( $sourceFileViaFolder )
                     {
                         Try
@@ -2542,7 +2550,7 @@ Function Process-Action
                             }
                             if( Invoke-WebRequest @webrequestParams -PassThru )
                             {
-                                $copied = Get-ItemProperty -Path $localfile
+                                $global:copied = Get-ItemProperty -Path $localfile
                             }
                         }
                         Catch
@@ -2552,7 +2560,7 @@ Function Process-Action
                                 -and ( $credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) `
                                     -and ( Invoke-WebRequest -Uri $sourceFileViaFolder -OutFile $localfile -Credential $credential -PassThru ) ) ## cannot reuse hashtable incase bad credential in there already
                             {
-                                $copied = Get-ItemProperty -Path $localfile
+                                $global:copied = Get-ItemProperty -Path $localfile
                             }
                             else
                             {
@@ -2561,16 +2569,16 @@ Function Process-Action
                         }
                     }
                     
-                    if( ! $copied )
+                    if( ! $global:copied )
                     {
-                        $copied = Copy-DatastoreItem -Item $global:sourceFile -Destination $localFile -PassThru
+                        $global:copied = Copy-DatastoreItem -Item $global:sourceFile -Destination $localFile -PassThru
                     }
 
-                    if( $copied )
+                    if( $global:copied )
                     {
                         if( $screenshotWindow = New-Form -inputXaml $screenshotXAML )
                         {
-                            if( $filestream = New-Object System.IO.FileStream -ArgumentList $copied.FullName , Open , Read )
+                            if( $filestream = New-Object System.IO.FileStream -ArgumentList $global:copied.FullName , Open , Read )
                             {
                                 $bitmap = New-Object -Typename System.Windows.Media.Imaging.BitmapImage
                                 $bitmap.BeginInit()
@@ -2594,6 +2602,16 @@ Function Process-Action
                                         }
                                     }
                                 })
+                                $WPFbtnScreenShotToClipboard.Add_Click({
+                                    if( $bitmap = [System.Drawing.Image]::FromFile( $global:copied.FullName ) )
+                                    {
+                                        [Windows.Forms.Clipboard]::SetImage( $bitmap )
+                                    }
+                                    else
+                                    {
+                                        [void][Windows.MessageBox]::Show( "Failed to open screenshot file $($copied.FullName)" , 'Screenshot Copy Error' , 'Ok' ,'Exclamation' )
+                                    }
+                                })
                                 $screenshotWindow.Show()
                                 $bitmap.StreamSource = $null
                                 $filestream.Close()
@@ -2602,12 +2620,13 @@ Function Process-Action
                             }
                             else
                             {
-                                [void][Windows.MessageBox]::Show( "Failed to open screenshot file $($copied.FullName)" , 'Snapshot Error' , 'Ok' ,'Exclamation' )
+                                [void][Windows.MessageBox]::Show( "Failed to open screenshot file $($copied.FullName)" , 'Screenshot Error' , 'Ok' ,'Exclamation' )
                             }
                         }
                         if( [string]::IsNullOrEmpty( $screenShotFolder ) )
                         {
-                            Remove-Item -Path $copied.FullName
+                            Remove-Item -Path $global:copied.FullName
+                            $global:copied = $null
                         }
                     }
                     else
@@ -2683,7 +2702,7 @@ Function Update-Form
     $datatable.Rows.Clear()
     $global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
     
-    $mainForm.Title = $mainForm.Title -replace 'connected to.*' , "connected to $($server -join ' , ') at $(Get-Date -Format G), $($global:vms.Count) VMs"
+    $mainForm.Title = $mainForm.Title -replace 'connected to.*$' , "connected to $($server -join ' , ') (v$($connection.Version) build $($connection.Build)) at $(Get-Date -Format G), $($global:vms.Count) VMs"
     $WPFVirtualMachines.Items.Refresh()
     $form.Cursor = $oldCursor
 }
@@ -3064,7 +3083,7 @@ $WPFchkPerfData.IsChecked = $performanceData
 
 [array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
 
-$mainForm.Title += " connected to $($server -join ' , ') at $(Get-Date -Format G), $($global:vms.Count) VMs"
+$mainForm.Title += " connected to $($server -join ' , ') (v$($connection.Version) build $($connection.Build)) at $(Get-Date -Format G), $($global:vms.Count) VMs"
 
 $WPFVirtualMachines.ItemsSource = $datatable.DefaultView
 $WPFVirtualMachines.IsReadOnly = $true
