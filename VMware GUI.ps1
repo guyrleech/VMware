@@ -46,6 +46,7 @@
     @guyrleech 18/06/2020  Bug fix for custom mstsc as was still passing existing non-custom parameters
     @guyrleech 16/07/2020  Added connection version and build details to title
     @guyrleech 17/07/2020  Added Copy to Clipboard button/function to screenshot window
+    @guyrleech 21/07/2020  Fixed scope issue in screenshot for copy/delete of image file
 #>
 
 <#
@@ -238,7 +239,6 @@ $pinvokeCode = @'
 [string]$global:mstscWidth = $null
 [string]$global:mstscHeight = $null
 [System.Management.Automation.PSCredential]$global:lastCredential = $null
-$global:copied = $null
 
 #region XAML
 [string]$mainwindowXAML = @'
@@ -2534,7 +2534,7 @@ Function Process-Action
                     [string]$localfile = Join-Path -Path $( if( ! [string]::IsNullOrEmpty( $screenShotFolder ) ) { $screenShotFolder } else { $env:temp }) -ChildPath "$(Get-Date -Format 'HHmmss-ddMMyy')-$(Split-Path -Path $shot -Leaf)"
                     
                     ## try and get the file through the /folder interface as much quicker than PS drive
-                    $global:copied = $null
+                    $copied = $null
                     if( $sourceFileViaFolder )
                     {
                         Try
@@ -2550,7 +2550,7 @@ Function Process-Action
                             }
                             if( Invoke-WebRequest @webrequestParams -PassThru )
                             {
-                                $global:copied = Get-ItemProperty -Path $localfile
+                                $copied = Get-ItemProperty -Path $localfile
                             }
                         }
                         Catch
@@ -2560,7 +2560,7 @@ Function Process-Action
                                 -and ( $credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) `
                                     -and ( Invoke-WebRequest -Uri $sourceFileViaFolder -OutFile $localfile -Credential $credential -PassThru ) ) ## cannot reuse hashtable incase bad credential in there already
                             {
-                                $global:copied = Get-ItemProperty -Path $localfile
+                                $copied = Get-ItemProperty -Path $localfile
                             }
                             else
                             {
@@ -2569,16 +2569,16 @@ Function Process-Action
                         }
                     }
                     
-                    if( ! $global:copied )
+                    if( ! $copied )
                     {
-                        $global:copied = Copy-DatastoreItem -Item $global:sourceFile -Destination $localFile -PassThru
+                        $copied = Copy-DatastoreItem -Item $global:sourceFile -Destination $localFile -PassThru
                     }
 
-                    if( $global:copied )
+                    if( $copied )
                     {
                         if( $screenshotWindow = New-Form -inputXaml $screenshotXAML )
                         {
-                            if( $filestream = New-Object System.IO.FileStream -ArgumentList $global:copied.FullName , Open , Read )
+                            if( $filestream = New-Object System.IO.FileStream -ArgumentList $copied.FullName , Open , Read )
                             {
                                 $bitmap = New-Object -Typename System.Windows.Media.Imaging.BitmapImage
                                 $bitmap.BeginInit()
@@ -2602,16 +2602,34 @@ Function Process-Action
                                         }
                                     }
                                 })
-                                $WPFbtnScreenShotToClipboard.Add_Click({
-                                    if( $bitmap = [System.Drawing.Image]::FromFile( $global:copied.FullName ) )
+                                $screenshotWindow.Add_Unloaded({
+                                    $_.Handled = $true
+                                    if( $this.PSObject.Properties[ 'ImageFileName' ] )
                                     {
-                                        [Windows.Forms.Clipboard]::SetImage( $bitmap )
+                                        ## we stored the file name in the parent window because we are async so cannot use variables in the calling function
+                                        Write-Verbose -Message "Deleting screenshot file `"$($this.ImageFileName)`""
+                                        Remove-Item -Path $this.ImageFileName
+                                    }
+                                })
+
+                                $WPFbtnScreenShotToClipboard.Add_Click({
+                                    $_.Handled = $true
+                                    ## we stored the file name in the parent window because we are async so cannot use variables in the calling function
+                                    if( $this.Parent -and $this.Parent.Parent -and $this.Parent.Parent.PSObject.Properties[ 'ImageFileName' ] -and ( $clipboardImage = [System.Drawing.Image]::FromFile( $this.Parent.Parent.ImageFileName ) ) )
+                                    {
+                                        Write-Verbose -Message "Putting image file `"$($this.Parent.Parent.ImageFileName)`" on clipboard"
+                                        [Windows.Forms.Clipboard]::SetImage( $clipboardImage )
+                                        $clipboardimage.Dispose()
+                                        $clipboardImage = $null
                                     }
                                     else
                                     {
-                                        [void][Windows.MessageBox]::Show( "Failed to open screenshot file $($copied.FullName)" , 'Screenshot Copy Error' , 'Ok' ,'Exclamation' )
+                                        [void][Windows.MessageBox]::Show( "Failed to open screenshot file" , 'Screenshot Copy Error' , 'Ok' ,'Exclamation' )
                                     }
                                 })
+
+                                ## because we are not modal, the $copied variable will be lost so we can't use it in callbacks so copy file details into our form for copy and delete later
+                                Add-Member -InputObject $screenshotWindow -MemberType NoteProperty -Name ImageFileName -Value $copied.FullName
                                 $screenshotWindow.Show()
                                 $bitmap.StreamSource = $null
                                 $filestream.Close()
@@ -2622,11 +2640,6 @@ Function Process-Action
                             {
                                 [void][Windows.MessageBox]::Show( "Failed to open screenshot file $($copied.FullName)" , 'Screenshot Error' , 'Ok' ,'Exclamation' )
                             }
-                        }
-                        if( [string]::IsNullOrEmpty( $screenShotFolder ) )
-                        {
-                            Remove-Item -Path $global:copied.FullName
-                            $global:copied = $null
                         }
                     }
                     else
