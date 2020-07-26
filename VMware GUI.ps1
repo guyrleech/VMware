@@ -47,6 +47,7 @@
     @guyrleech 16/07/2020  Added connection version and build details to title
     @guyrleech 17/07/2020  Added Copy to Clipboard button/function to screenshot window
     @guyrleech 21/07/2020  Fixed scope issue in screenshot for copy/delete of image file
+    @guyrleech 26/07/2020  Added VM creation date
 #>
 
 <#
@@ -930,8 +931,7 @@ Function Process-Snapshot
     elseif( $Operation -eq 'DetailsSnapshot' )
     {
         $closeDialogue = $false
-        $VM = Get-VM -Id $VMId
-        if( $VM )
+        if( $VM =  Get-VM -Id $VMId )
         {
             [string]$tag = $null
             if( $GUIobject.SelectedItem -and $GUIobject.PSObject.Properties[ 'SelectedItem' ] )
@@ -2765,6 +2765,7 @@ Function Get-VMs
                 'Power State' = $powerState[ $vm.PowerState.ToString() ]
                 'IP Addresses' = $IPaddresses -join ','
                 'Snapshots' = ( $snapshots | Where-Object VMId -eq $VM.Id | Measure-Object|Select-Object -ExpandProperty Count)
+                'Created' = $vm.ExtensionData.Config.CreateDate
                 'Started' = $vm.ExtensionData.Runtime.BootTime
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
@@ -3073,7 +3074,7 @@ $datatable = New-Object -TypeName System.Data.DataTable
 
 ##[string[]]$displayedFields =  @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 $displayedFields = New-Object -TypeName System.Collections.Generic.List[String] 
-$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
+$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 If( $lastSeconds -gt 0 )
 {
     $displayedFields += @( 'Mem Usage Average','Cpu Usagemhz Average','Net Usage Average','Cpu Usage Average','Disk Usage Average' )
@@ -3085,7 +3086,7 @@ ForEach( $field in $displayedFields )
     $type = $(Switch -Regex ( $field )
     {
         'vCPUS|Memory|Snapshots|HW|Used|Average' { 'int' }
-        'Started' { 'datetime' }
+        'Started|Created' { 'datetime' }
         default { 'string' }
     })
 
