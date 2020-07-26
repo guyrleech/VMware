@@ -48,6 +48,7 @@
     @guyrleech 17/07/2020  Added Copy to Clipboard button/function to screenshot window
     @guyrleech 21/07/2020  Fixed scope issue in screenshot for copy/delete of image file
     @guyrleech 26/07/2020  Added VM creation date
+                           Added Take Snapshot context menu
 #>
 
 <#
@@ -260,20 +261,21 @@ $pinvokeCode = @'
         <DataGrid HorizontalAlignment="Stretch" VerticalAlignment="Top" x:Name="VirtualMachines" >
             <DataGrid.ContextMenu>
                 <ContextMenu>
-                    <MenuItem Header="_Console" x:Name="ConsoleContextMenu" />
-                    <MenuItem Header="_Run" x:Name="RunScriptContextMenu" />
-                    <MenuItem Header="_Mstsc" x:Name="MstscContextMenu" />
+                    <MenuItem Header="Console" x:Name="ConsoleContextMenu" />
+                    <MenuItem Header="Mstsc" x:Name="MstscContextMenu" />
                     <MenuItem Header="Mstsc (Custom)" x:Name="MstscNewContextMenu" />
                     <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
+                    <MenuItem Header="Take Snapshot" x:Name="TakeSnapshotContextMenu" />
                     <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
-                    <MenuItem Header="_CD" x:Name="CDContextMenu" >
+                    <MenuItem Header="CD" x:Name="CDContextMenu" >
                         <MenuItem Header="Mount" x:Name="CDConnectContextMenu" />
                         <MenuItem Header="Eject" x:Name="CDDisconnectContextMenu" />
                     </MenuItem>
                     <MenuItem Header="Update Tools" x:Name="UpdateToolsContextMenu" />
+                    <MenuItem Header="Run" x:Name="RunScriptContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
                     <MenuItem Header="Screenshot" x:Name="ScreenshotContextMenu" />
                     <MenuItem Header="Power" x:Name="PowerContextMenu">
@@ -897,8 +899,7 @@ Function Process-Snapshot
     }
     elseif( $Operation -eq 'TakeSnapShot' )
     {
-        $takeSnapshotForm = New-Form -inputXaml $takeSnapshotXAML
-        if( $takeSnapshotForm )
+        if( $takeSnapshotForm = New-Form -inputXaml $takeSnapshotXAML )
         {
             $takeSnapshotForm.Title += " of $($vm.name)"
 
@@ -1805,6 +1806,10 @@ Function Process-Action
                 {
                     Update-Tools -NoReboot -RunAsync -VM $vm
                 }             
+            }
+            elseif( $operation -eq 'TakeSnapshot' )
+            {
+                Process-Snapshot -GUIobject $GUIobject -Operation $Operation -VMId $vm.Id
             }
             elseif( $operation -eq 'RunScript' )
             {
@@ -3126,6 +3131,7 @@ $WPFCDConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachi
 $WPFCDDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'DisconnectCD'} )
 $WPFUpdateToolsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'UpdateTools'} )
 $WPFRunScriptContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'RunScript'} )
+$WPFTakeSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'TakeSnapShot' } )
 
 $WPFbtnDatastores.Add_Click({
     $_.Handled = $true
@@ -3239,8 +3245,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUMCVzEaCg84ryoOqoOuOd4pet
-# CuWgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUmTwVx/RGUop5EGj9s3EtHFjH
+# jNOgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3301,11 +3307,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFBA4680c2Ml2JU6PkYZ1
-# ex/foY13MA0GCSqGSIb3DQEBAQUABIIBAIJEH1dsC79UgwPskH6ncNiTIokS/nQD
-# 0CfKIrkZ9EX4M6YsWN7uhG01jzUE/MXDePLwzcoQTolxp6iabu9qWXz/KhB6N7SZ
-# HnN1fE1Mi2OtVNECfdLebu1l5LXHeXde+hc/+WAQ9MFvJObeMtJzmYr/Gj3EF8g1
-# 8QXHdbMRzKDdnj/eOjvB6OUS3BlnpGcNG4Se81xHYnIP92wWFdgk0d/poQg0BcvB
-# kcIyMGB5MmuGGGfyDuIlZpsqeOXeMutoKj+akLoLhAB4cd24NbDBbyc22t6b27m1
-# DEFhwH5MOCWf9bDHmEKy1e1E6Wz20QiB5rQvVehMcxMb0XAqMacEc98=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFIgy7muX3zEAsWn33No4
+# Zx1K1bcmMA0GCSqGSIb3DQEBAQUABIIBAFeRy5ZyP1yB1tfkF4cyoenVTksyNZqu
+# ZPQxpv3rngufMQnz4rwO0EqKsrxCQaG/0I+uSRdPv4tDfX0Q7SBPeoE3yHeeshE0
+# lMw3qBl6sc+ilUHniKmez/Fj2k7RPqyj69jLYokzH7tCCXtXTcOfrJbRbncXSeZ0
+# OZ6DzzfsHMxwu7AaaX6FAfc23dHDg42WEWELc9u8JJJWhKq9yxx+6Gs0ah4ytZ0E
+# txTmZ+rDvZIrnbPhjNph14f1reHyv9Rf4cBvOHHo93GF9u8wIS4QdKo0FEqfyJcO
+# CC44LPM5F+N9adyVoGb9lbmv75ALs4FWGn0JPprfHgQ18hYH0xtxxyA=
 # SIG # End signature block
