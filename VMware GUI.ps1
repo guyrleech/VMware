@@ -50,6 +50,7 @@
     @guyrleech 26/07/2020  Added VM creation date
                            Added Take Snapshot context menu
     @guyrleech 10/08/2020  Added NIC connect/disconnect information & context menu to connect/disconnect NICS
+                           Added Name to Clipboard and Explore context menus
 #>
 
 <#
@@ -84,6 +85,10 @@ The name of a VM or pattern to include in the GUI
 .PARAMETER performanceData
 
 Enable fetching and displaying of per-VM performance data. Can be changed via a toggle within the UI too
+
+.PARAMETER share
+
+The share to open when using the Explore option. Defaults to C$
 
 .PARAMETER rdpPort
 
@@ -184,7 +189,7 @@ Param
     [string]$vmName = '*' ,
     [int]$rdpPort = 3389 ,
     [string]$mstscParams ,
-    [ValidateSet('mstsc','MstscNew','console','PowerOn','reconfigure','snapshots','Delete','backup','ConnectCD','DisconnectCD','UpdateTools','RunScript','Events','MstscNew','LatestSnapshotRevert','ScreenShot')]
+    [ValidateSet('mstsc','MstscNew','console','PowerOn','reconfigure','snapshots','Delete','backup','ConnectCD','DisconnectCD','UpdateTools','RunScript','Events','MstscNew','LatestSnapshotRevert','ScreenShot','NameToClipboard','Explore')]
     [string]$doubleClick = 'mstsc',
     [switch]$saveCredentials ,
     [switch]$ipv6 ,
@@ -199,6 +204,7 @@ Param
     [string]$backupSnapshotName = 'For Backup Taking via Script' ,
     [int]$lastSeconds = 300 ,
     [string]$exclude = 'uptime' ,
+    [string]$share = 'C$' ,
     [switch]$noReuseMstsc ,
     [int]$maxEvents = 10000 ,
     [int]$OutputWidth = 400 ,
@@ -271,6 +277,8 @@ $pinvokeCode = @'
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
+                    <MenuItem Header="Name to Clipboard" x:Name="NameToClipboardContextMenu" />
+                    <MenuItem Header="Explore" x:Name="ExploreContextMenu" />
                     <MenuItem Header="NICs" x:Name="NICContextMenu" >
                         <MenuItem Header="Connect" x:Name="NICConnectContextMenu" />
                         <MenuItem Header="Disconnect" x:Name="NICDisconnectContextMenu" />
@@ -1776,6 +1784,7 @@ Function Process-Action
     $scriptResults = New-Object -TypeName System.Collections.Generic.List[psobject]
     [int]$scriptsRun = 0
     [string]$cdfile = $null 
+    [string]$clipboardString = $null
 
     ForEach( $selectedVM in $selectedVMs )
     {
@@ -2090,6 +2099,68 @@ Function Process-Action
                     return
                 }
             }
+            elseif( $Operation -eq 'NameToClipboard' )
+            {
+                if( $clipboardString )
+                {
+                    $clipboardString += ",$($vm.Name)"
+                }
+                else
+                {
+                    $clipboardString = $vm.Name
+                }
+            }
+            elseif( $Operation -eq 'Explore' )
+            {
+                [string]$remoteShare = "\\$($vm.Name)\$share"
+                ## see if we can get at it without credentials so we can just open it otherwise we'll need to map a drive
+                if( $result = Invoke-Command -ComputerName $vm.Name -ScriptBlock { Get-ChildItem -Path $using:remoteShare -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue )
+                {
+                    Start-Process -FilePath $remoteShare
+                }
+                else ## need to map a drive with credentials
+                {
+                    ## find the next free drive letter
+                    [string]$driveLetter = $null
+                    [int]$tryDriveLetterAscii = [byte][char]'Z'
+                    do
+                    {
+                        if( ! ( Get-PSDrive -PSProvider FileSystem -Name ([char]$tryDriveLetterAscii) -ErrorAction SilentlyContinue ) )
+                        {
+                            $driveLetter = [char]$tryDriveLetterAscii
+                        }
+                        else
+                        {
+                            $tryDriveLetterAscii--
+                        }
+                    }
+                    while( ! $driveLetter -and $tryDriveLetterAscii -ge [byte][char]'A' )
+
+                    if( ! $driveLetter )
+                    {
+                        [Windows.MessageBox]::Show( "Unable to find unused drive letter to map to $remoteShare" , "Explore Error" , 'Ok' ,'Error' )
+                    }
+                    else
+                    {
+                        if( ! ( $thisCredential = $global:lastCredential ) -and ! ( $thisCredential = $credential ) )
+                        {
+                            $thisCredential = Get-Credential -Message "Connect to $remoteShare at $(Get-Date -Format G)"
+                            $global:lastCredential = $thisCredential
+                        }
+                        ## New-PSDrive has to be persistent which we don't want (probably)
+                        $networkObject = New-Object -ComObject Wscript.Network
+                        $networkObject.MapNetworkDrive( "$($driveLetter):" , $remoteShare , $false , $thisCredential.UserName , $thisCredential.GetNetworkCredential().Password )
+                        if( ! $? )
+                        {
+                            [Windows.MessageBox]::Show( "Failed to map $driveLetter to $remoteShare as $($thisCredential|Select-Object -ExpandProperty UserName)" , "Explore Error" , 'Ok' ,'Error' )
+                        }
+                        else
+                        {
+                            Start-Process -FilePath "$($driveLetter):\"
+                        }
+                    }
+                }
+            }
             elseif( $operation -eq 'backup' )
             {
                 ## http://www.simonlong.co.uk/blog/2010/05/05/powercli-a-simple-vm-backup-script/
@@ -2357,7 +2428,7 @@ Function Process-Action
                     {
                         [string]$action = $Operation -replace 'NIC'
                         [string]$answer = 'no'
-                        if( ( $answer = [Windows.MessageBox]::Show( "Are you sure you want to $($action.ToLower()) NICS in $($vm.Name)?" , "Confirm NIC $action Operation" , 'YesNo' ,'Question' ) ) -eq 'Yes' )
+                        if( ( $answer = [Windows.MessageBox]::Show( "Are you sure you want to $($action.ToLower()) NICs in $($vm.Name)?" , "Confirm NIC $action Operation" , 'YesNo' ,'Question' ) ) -eq 'Yes' )
                         {
                             if( ! ( $result = $NICs | Where-Object { $_.ConnectionState.Connected -ne $connectIt } | Set-NetworkAdapter -Connected $connectIt -Confirm:$False ) )
                             {
@@ -2736,6 +2807,11 @@ Function Process-Action
         }
     }
 
+    if( ! [string]::IsNullOrEmpty( $clipboardString ) )
+    {
+        $clipboardString | Set-Clipboard
+    }
+
     if( $scriptResults -and $scriptResults.Count )
     {
         [string]$message = "Output from `"$($scriptDetails.Path)`" on $ScriptsRun VMs at $(Get-Date -Format G)"
@@ -2783,6 +2859,9 @@ Function Get-VMs
         $params.Add( 'Name' , $pattern )
     }
      
+    [array]$NICs = @( Get-NetworkAdapter -VM * )
+    Write-Verbose -Message "Got $($NICs.Count) NICS"
+
     [array]$vms = @( VMware.VimAutomation.Core\Get-VM @params | Sort-Object -Property $script:sortProperty | . { Process
     {
         $vm = $PSItem
@@ -2802,7 +2881,7 @@ Function Get-VMs
         if( $include )
         {
             [string[]]$IPaddresses = @( $vm.guest | Select-Object -ExpandProperty IPAddress | Where-Object { $_ -match $addressPattern } | Sort-Object )
-            [array]$NICs = @( Get-NetworkAdapter -VM $vm -ErrorAction SilentlyContinue )
+            [array]$thisVMsNics = @( $NICs.Where( { $_.ParentId -eq $VM.Id } ))
             [hashtable]$additionalProperties = @{
                 'Host' = $vm.VMHost.Name
                 'vCPUs' = $vm.NumCpu
@@ -2813,8 +2892,8 @@ Function Get-VMs
                 'Started' = $vm.ExtensionData.Runtime.BootTime
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
-                'Network(s)' = ($NICS | Select-Object -ExpandProperty NetworkName | Sort-Object -Unique) -join ','
-                'NICs connected' = "{0}/{1}" -f ($NICs | Where-Object { $_.ConnectionState.Connected } | Measure-Object | Select-Object -ExpandProperty Count) , $NICS.Count
+                'Network(s)' = ($thisVMsNics | Select-Object -ExpandProperty NetworkName | Sort-Object -Unique) -join ','
+                'NICs connected' = "{0}/{1}" -f ($thisVMsNics.Where( { $_.ConnectionState.Connected } ) | Measure-Object | Select-Object -ExpandProperty Count) , $thisVMsNics.Count
                 'Memory (GB)' = $vm.MemoryGB
                 'Guest OS' = $(If( $vm.Guest -and $vm.Guest.OSFullName ) { $vm.Guest.OSFullName } Else { $vm.GuestId })
                 'HW Version' = $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1'
@@ -3180,6 +3259,8 @@ $WPFNICDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualM
 $WPFUpdateToolsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'UpdateTools'} )
 $WPFRunScriptContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'RunScript'} )
 $WPFTakeSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'TakeSnapShot' } )
+$WPFNameToClipboardContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'NameToClipboard' } )
+$WPFExploreContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Explore' } )
 
 $WPFbtnDatastores.Add_Click({
     $_.Handled = $true
@@ -3293,8 +3374,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU10HSpG6t8H8mlxBHAYCSeOcu
-# bGegggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUPOKOk+sKWtQJyw5lLa42RvBN
+# eeygggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3355,11 +3436,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFLwbn9/LWKUgJvsq27rm
-# hQvSBz4qMA0GCSqGSIb3DQEBAQUABIIBABwWnwxwpoeB4mqD6Y/27/Wm+n+oWxXo
-# zriLOAy1LUQWYKl5FtuM2X/OjJXwvricIpkKw7Qv69VBQHmd6gpvBrKGJMVRh0oL
-# iQL4RUHsWs8ZGiujoJFXFW4OwnTwZBO/vJSOmJM/JfeE87FBRpxFJNrboQv6+cJF
-# HDkonZymYEGhWbXu1y8w8dyTN1QLLdKzgRoCf/QFrJX/SG3XeXImol2p+uIqwhwm
-# FaZqmkv82BIz41MjT3P/KZnCGvjAHpJAm+Bp1CoxdA0LWbmErgE+wz6FUjFwkZDu
-# xWdfEDngiv5upUDrAikRm3ZJHKDTxxEbTEQIloRcP4GX2WCUjU1vyTw=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFH+Kby6bdnydwZNbi/F4
+# UvnWr8DVMA0GCSqGSIb3DQEBAQUABIIBAI7fhs8+8wBUHI8+HhX+tNK5Q9msM1hz
+# GwbWBjJxgpgGKv7R5ogK1Uhb2rNx4UqnJKD4IB7re/zLdbosDRktk3/zRma4tUDJ
+# TF7dGMrMcUepLiE58vyZHM699CFKA6LLlwFruVGL3C7+Y4mN4IavBkwZG6KG3VWm
+# P2l7tTuA6JHLWGyvGWAbe1W/rfvIvrELgfHSMfFHUTsyvaD44XEQYUYs2Z+ke0Tn
+# T7UGAh6RESi7KhTyiVhFc9GF0KzBhjHB2Z5c0FLRQk4H+RTYHOIqmlHBl8OcjImM
+# +mWUWmWMq/sD2IsAxvGZMsa8A7WAz+ySoitd5NUdirDlTgMuFrhvUSU=
 # SIG # End signature block
