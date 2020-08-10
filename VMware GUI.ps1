@@ -49,6 +49,7 @@
     @guyrleech 21/07/2020  Fixed scope issue in screenshot for copy/delete of image file
     @guyrleech 26/07/2020  Added VM creation date
                            Added Take Snapshot context menu
+    @guyrleech 10/08/2020  Added NIC connect/disconnect information & context menu to connect/disconnect NICS
 #>
 
 <#
@@ -270,6 +271,10 @@ $pinvokeCode = @'
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
+                    <MenuItem Header="NICs" x:Name="NICContextMenu" >
+                        <MenuItem Header="Connect" x:Name="NICConnectContextMenu" />
+                        <MenuItem Header="Disconnect" x:Name="NICDisconnectContextMenu" />
+                    </MenuItem>
                     <MenuItem Header="CD" x:Name="CDContextMenu" >
                         <MenuItem Header="Mount" x:Name="CDConnectContextMenu" />
                         <MenuItem Header="Eject" x:Name="CDDisconnectContextMenu" />
@@ -2329,6 +2334,39 @@ Function Process-Action
                     [void][Windows.MessageBox]::Show( "No address for $($vm.Name)" , 'Connection Error' , 'Ok' ,'Warning' )
                 }
             }
+            elseif( $Operation -match 'ConnectNIC$' )
+            {
+                [array]$NICS = @( Get-NetworkAdapter -VM $vm )
+                if( ! $NICs -or ! $NICs.Count )
+                {
+                    [void][Windows.MessageBox]::Show( "VM $($vm.Name) has no NICs" , 'NIC Connection Error' , 'Ok' ,'Exclamation' )
+                }
+                else
+                {
+                    [bool]$connectIt = $Operation -match '^Connect'
+                    [int]$connectedNICs = ($NICs | Where-Object { $_.ConnectionState.Connected } | Measure-Object | Select-Object -ExpandProperty Count)
+                    if( $connectIt -and $connectedNICs -eq $NICS.Count )
+                    {
+                        [void][Windows.MessageBox]::Show( "VM $($vm.Name) has no disconnected NICs" , 'NIC Connection Error' , 'Ok' ,'Exclamation' )
+                    }
+                    elseif( ! $connectIt -and $connectedNICs -eq 0 )
+                    {
+                        [void][Windows.MessageBox]::Show( "VM $($vm.Name) has no connected NICs" , 'NIC Disconnection Error' , 'Ok' ,'Exclamation' )
+                    }
+                    else
+                    {
+                        [string]$action = $Operation -replace 'NIC'
+                        [string]$answer = 'no'
+                        if( ( $answer = [Windows.MessageBox]::Show( "Are you sure you want to $($action.ToLower()) NICS in $($vm.Name)?" , "Confirm NIC $action Operation" , 'YesNo' ,'Question' ) ) -eq 'Yes' )
+                        {
+                            if( ! ( $result = $NICs | Where-Object { $_.ConnectionState.Connected -ne $connectIt } | Set-NetworkAdapter -Connected $connectIt -Confirm:$False ) )
+                            {
+                                [void][Windows.MessageBox]::Show( "Problem during $action of NICs in $($vm.Name)" , "NIC $($action)ion Error" , 'Ok' ,'Exclamation' )
+                            }
+                        }
+                    }
+                }
+            }
             elseif( $Operation -eq 'ConnectCD' )
             {
                 if( $cddrive = Get-CDDrive -VM $vm -ErrorAction SilentlyContinue )
@@ -2764,6 +2802,7 @@ Function Get-VMs
         if( $include )
         {
             [string[]]$IPaddresses = @( $vm.guest | Select-Object -ExpandProperty IPAddress | Where-Object { $_ -match $addressPattern } | Sort-Object )
+            [array]$NICs = @( Get-NetworkAdapter -VM $vm -ErrorAction SilentlyContinue )
             [hashtable]$additionalProperties = @{
                 'Host' = $vm.VMHost.Name
                 'vCPUs' = $vm.NumCpu
@@ -2774,6 +2813,8 @@ Function Get-VMs
                 'Started' = $vm.ExtensionData.Runtime.BootTime
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
+                'Network(s)' = ($NICS | Select-Object -ExpandProperty NetworkName | Sort-Object -Unique) -join ','
+                'NICs connected' = "{0}/{1}" -f ($NICs | Where-Object { $_.ConnectionState.Connected } | Measure-Object | Select-Object -ExpandProperty Count) , $NICS.Count
                 'Memory (GB)' = $vm.MemoryGB
                 'Guest OS' = $(If( $vm.Guest -and $vm.Guest.OSFullName ) { $vm.Guest.OSFullName } Else { $vm.GuestId })
                 'HW Version' = $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1'
@@ -3063,8 +3104,13 @@ if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'N
 {
     Write-Warning "Not connected to $($server -join ',') so reconnecting"
     $connectParameters|Write-Verbose
-    $connection = Connect-VIServer @connectParameters
+    if( $connection = Connect-VIServer @connectParameters )
+    {
+        $snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName )
+    }
 }
+
+Write-Verbose -Message "Got $($snapshots.Count) snapshots"
 
 [hashtable]$script:datastores = @{}
 Get-Datastore | ForEach-Object `
@@ -3079,7 +3125,7 @@ $datatable = New-Object -TypeName System.Data.DataTable
 
 ##[string[]]$displayedFields =  @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 $displayedFields = New-Object -TypeName System.Collections.Generic.List[String] 
-$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
+$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "Network(s)" , "NICs Connected" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 If( $lastSeconds -gt 0 )
 {
     $displayedFields += @( 'Mem Usage Average','Cpu Usagemhz Average','Net Usage Average','Cpu Usage Average','Disk Usage Average' )
@@ -3129,6 +3175,8 @@ $WPFBackupContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines
 $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
 $WPFCDConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'ConnectCD'} )
 $WPFCDDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'DisconnectCD'} )
+$WPFNICConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'ConnectNIC'} )
+$WPFNICDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'DisconnectNIC'} )
 $WPFUpdateToolsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'UpdateTools'} )
 $WPFRunScriptContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'RunScript'} )
 $WPFTakeSnapshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'TakeSnapShot' } )
@@ -3245,8 +3293,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUmTwVx/RGUop5EGj9s3EtHFjH
-# jNOgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU10HSpG6t8H8mlxBHAYCSeOcu
+# bGegggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3307,11 +3355,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFIgy7muX3zEAsWn33No4
-# Zx1K1bcmMA0GCSqGSIb3DQEBAQUABIIBAFeRy5ZyP1yB1tfkF4cyoenVTksyNZqu
-# ZPQxpv3rngufMQnz4rwO0EqKsrxCQaG/0I+uSRdPv4tDfX0Q7SBPeoE3yHeeshE0
-# lMw3qBl6sc+ilUHniKmez/Fj2k7RPqyj69jLYokzH7tCCXtXTcOfrJbRbncXSeZ0
-# OZ6DzzfsHMxwu7AaaX6FAfc23dHDg42WEWELc9u8JJJWhKq9yxx+6Gs0ah4ytZ0E
-# txTmZ+rDvZIrnbPhjNph14f1reHyv9Rf4cBvOHHo93GF9u8wIS4QdKo0FEqfyJcO
-# CC44LPM5F+N9adyVoGb9lbmv75ALs4FWGn0JPprfHgQ18hYH0xtxxyA=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFLwbn9/LWKUgJvsq27rm
+# hQvSBz4qMA0GCSqGSIb3DQEBAQUABIIBABwWnwxwpoeB4mqD6Y/27/Wm+n+oWxXo
+# zriLOAy1LUQWYKl5FtuM2X/OjJXwvricIpkKw7Qv69VBQHmd6gpvBrKGJMVRh0oL
+# iQL4RUHsWs8ZGiujoJFXFW4OwnTwZBO/vJSOmJM/JfeE87FBRpxFJNrboQv6+cJF
+# HDkonZymYEGhWbXu1y8w8dyTN1QLLdKzgRoCf/QFrJX/SG3XeXImol2p+uIqwhwm
+# FaZqmkv82BIz41MjT3P/KZnCGvjAHpJAm+Bp1CoxdA0LWbmErgE+wz6FUjFwkZDu
+# xWdfEDngiv5upUDrAikRm3ZJHKDTxxEbTEQIloRcP4GX2WCUjU1vyTw=
 # SIG # End signature block
