@@ -51,6 +51,10 @@
                            Added Take Snapshot context menu
     @guyrleech 10/08/2020  Added NIC connect/disconnect information & context menu to connect/disconnect NICS
                            Added Name to Clipboard and Explore context menus
+    @guyrleech 12/08/2020  Moved all snapshot menu items into snapshot sub menu
+    @guyrleech 11/09/2020  Changed create and start dates from UTC to local time
+    @guyrleech 08/12/2020  Fixed code to bring existing mstsc & console windows to front
+                           Added -topMost argument to keep window on top of all others
 #>
 
 <#
@@ -199,6 +203,7 @@ Param
     [bool]$showPoweredOn = $true,
     [bool]$showPoweredOff ,
     [bool]$showSuspended ,
+    [switch]$topMost ,
     [switch]$showAll ,
     [switch]$performanceData ,
     [string]$backupSnapshotName = 'For Backup Taking via Script' ,
@@ -239,6 +244,10 @@ $pinvokeCode = @'
         [DllImport("user32.dll", SetLastError=true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); 
+
+        [DllImport("user32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos( IntPtr hWnd, IntPtr hWndInsertAfter, int  X, int  Y, int  cx, int  cy,  uint uFlags); 
 '@
 
 [string]$youAreHereSnapshot = 'YouAreHere' 
@@ -271,14 +280,16 @@ $pinvokeCode = @'
                     <MenuItem Header="Console" x:Name="ConsoleContextMenu" />
                     <MenuItem Header="Mstsc" x:Name="MstscContextMenu" />
                     <MenuItem Header="Mstsc (Custom)" x:Name="MstscNewContextMenu" />
-                    <MenuItem Header="Snapshots" x:Name="SnapshotContextMenu" />
-                    <MenuItem Header="Take Snapshot" x:Name="TakeSnapshotContextMenu" />
-                    <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
                     <MenuItem Header="Reconfigure" x:Name="ReconfigureContextMenu" />
                     <MenuItem Header="Events" x:Name="EventsContextMenu" />
                     <MenuItem Header="Backup" x:Name="BackupContextMenu" />
                     <MenuItem Header="Name to Clipboard" x:Name="NameToClipboardContextMenu" />
                     <MenuItem Header="Explore" x:Name="ExploreContextMenu" />
+                    <MenuItem Header="Snapshots" x:Name="SnapshotsContextMenu" >
+                        <MenuItem Header="Management" x:Name="SnapshotContextMenu" />
+                        <MenuItem Header="Take Snapshot" x:Name="TakeSnapshotContextMenu" />
+                        <MenuItem Header="Revert to latest snapshot" x:Name="LatestSnapshotRevertContextMenu" />
+                    </MenuItem>
                     <MenuItem Header="NICs" x:Name="NICContextMenu" >
                         <MenuItem Header="Connect" x:Name="NICConnectContextMenu" />
                         <MenuItem Header="Disconnect" x:Name="NICDisconnectContextMenu" />
@@ -649,23 +660,43 @@ $pinvokeCode = @'
 Function Refresh-Form
 {
     $getError = $null
-    $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
-
-    Write-Verbose "Got $($getError.Count) errors"
-    if( $getError )
+    try
     {
-        $getError[0].Exception.Message|Write-Verbose
+        $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -ErrorVariable getError -Name ($(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName })) | VMware.VimAutomation.Core\Get-Snapshot )
     }
-    if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+    catch
     {
-        $connection = Connect-VIServer @connectParameters
-        [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+        $getError = $_
+        Write-Warning -Message $_
+    }
+
+    [bool]$continue = $true
+
+    if( $exception = ( $getError | Select-Object -expandproperty Exception | Select-Object -ExpandProperty Message -First 1 ) )
+    {
+        Write-Verbose -Message $exception
+
+        if( $exception -match 'Not Connected' )
+        {
+            if( $connection = Connect-VIServer @connectParameters )
+            {
+                $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -Name ($(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName })) | VMware.VimAutomation.Core\Get-Snapshot )
+            }
+            else
+            {
+                $continue = $false
+                [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+            }
+        }
     }
 
     $script:datastores.Clear()
-    Get-Datastore | ForEach-Object { $script:datastores.Add( $PSItem.Id , $PSItem.Name ) }
+    if( $continue )
+    {
+        Get-Datastore | ForEach-Object { $script:datastores.Add( $PSItem.Id , $PSItem.Name ) }
 
-    Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
+        Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
+    }
 }
 
 Function New-Form
@@ -705,6 +736,29 @@ Function New-Form
     }
 
     $form
+}
+
+Function Set-WindowToFront
+{
+    Param
+    (
+        [Parameter(Mandatory)]
+        [IntPtr]$windowHandle
+    )
+    
+    ## first restore window
+    if( [bool]$setForegroundWindow = [win32.user32]::ShowWindowAsync( $windowHandle , 9 ) ) ## 9 = SW_RESTORE
+    {
+        ## https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos
+        ## now set window top most to bring it to front
+        if( $setForegroundWindow = [win32.user32]::SetWindowPos( $windowHandle, [IntPtr]-1 , 0 ,0 , 0 , 0 , 0x4043 ) ) ## -1 = HWND_TOPMOST , -2 = HWND_NOTOPMOST , 0x4043 = SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW | SWP_NOSIZE | SWP_NOMOVE
+        {
+            ## now set window to not top most but will stay on top for now (otherwise would always be on top like task manager can be)
+            $setForegroundWindow  = [win32.user32]::SetWindowPos( $windowHandle, [IntPtr]-2 , 0 ,0 , 0 , 0 , 0x4043 ) 
+        }
+    }
+
+    $setForegroundWindow ## return
 }
 
 Function Set-Filters
@@ -966,8 +1020,7 @@ Function Process-Snapshot
             {
                 return
             }
-            $snapshot = Get-Snapshot -Id $tag -VM $vm
-            if( $snapshot )
+            if( $snapshot = Get-Snapshot -Id $tag -VM $vm )
             {
                 [string]$details = "Name = $($snapshot.Name)`n`rDescription = $($snapshot.Description)`n`rCreated = $(Get-Date -Date $snapshot.Created -Format G)`n`rSize = $([math]::Round( $snapshot.SizeGB , 2 ))GB`n`rPower State = $($snapshot.PowerState)`n`rQuiesced = $(if( $snapshot.Quiesced ) { 'Yes' } else {'No' })"
                 [void][Windows.MessageBox]::Show( $details , 'Snapshot Details' , 'Ok' ,'Information' )
@@ -989,8 +1042,7 @@ Function Process-Snapshot
         {
             if( $Operation -eq 'LatestSnapshotRevert' )
             {
-                $snapshot = Get-Snapshot -VM $vm|Sort-Object -Property Created -Descending|Select-Object -First 1
-                if( ! $snapshot )
+                if( ! ( $snapshot = Get-Snapshot -VM $vm|Sort-Object -Property Created -Descending|Select-Object -First 1 ))
                 {
                     [Windows.MessageBox]::Show( "No snapshots found for $($vm.Name)" , 'Snapshot Revert Error' , 'OK' ,'Error' )
                     return
@@ -1519,9 +1571,9 @@ Function Show-DatastoreFileChooser
         Try
         {
             [hashtable]$webrequestParams = @{ 'Uri' = $basePath ; 'SessionVariable' = 'websession' }
-            if( $credential )
+            if( $global:credential )
             {
-                $webrequestParams.Add( 'Credential' , $credential )
+                $webrequestParams.Add( 'Credential' , $global:credential )
             }
             else
             {
@@ -1533,9 +1585,10 @@ Function Show-DatastoreFileChooser
         {
             ## if unauthorised, prompt for credentials
             if( $_.ToString() -match '\(401\)' `
-                -and ( $credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) )
+                -and ( $global:credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) )
             {
-                $webrequestParams.Credential = $credential
+                $webrequestParams.Credential = $global:credential
+                $global:lastCredential = $global:credential
                 $webrequestParams.Remove( 'UseDefaultCredentials' )
                 $result = Invoke-WebRequest @webrequestParams
             }
@@ -1791,13 +1844,12 @@ Function Process-Action
         $loopIterations++
         ## Don't use VM cache here in case changed since cache made
         $getError = $null
-        $vm = VMware.VimAutomation.Core\Get-VM -Name $selectedVM.Name -ErrorVariable getError | Where-Object { $_.VMHost.Name -eq $selectedVM.Host }
-        if( ! $vm )
+        if( ! ( $vm = VMware.VimAutomation.Core\Get-VM -Name $selectedVM.Name -ErrorVariable getError | Where-Object { $_.VMHost.Name -eq $selectedVM.Host } ) )
         {
             [string]$message = "Unable to get VM $($selectedVM.Name)"
             if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
             {
-                $string += '. Try clicking "Refresh" as no longer connected'
+                $message += '. Try clicking "Refresh" as no longer connected'
             }
             [void][Windows.MessageBox]::Show( $message , 'Action Error' , 'Ok' ,'Error' )
             return
@@ -2204,27 +2256,42 @@ Function Process-Action
                             $backupForm.Close()  }
                         })
 
-                    $result = $backupForm.ShowDialog()
-
-                    if( $result )
+                    if( $result = $backupForm.ShowDialog() )
                     {
-                        if( $cloneSnapshot = New-Snapshot -VM $vm -Name ( [System.Environment]::ExpandEnvironmentVariables( $backupSnapshotName ) ) )
+                        if( ! ( $destinationDatastore = Get-Datastore -Name $wpfcomboDatastore.SelectedItem | Select -First 1 ) )
                         {
-                            $vmView = $vm | Get-View
-                            $cloneSpec = New-Object -Typename Vmware.Vim.VirtualMachineCloneSpec
+                            [void][Windows.MessageBox]::Show( "Failed to get datastore `"$($wpfcomboDatastore.SelectedItem)`" for backup of $($vm.Name)" , 'Backup Error' , 'OK' ,'Error' )
+                        }
+                        elseif( ( $cloneSnapshot = New-Snapshot -VM $vm -Quiesce -Name ( [System.Environment]::ExpandEnvironmentVariables( $backupSnapshotName ) ) ) -and ( $vmView = Get-View -VIObject $vm ) -and ($cloneSpec = New-Object -Typename Vmware.Vim.VirtualMachineCloneSpec) )
+                        {
                             $cloneSpec.Snapshot = $vmView.Snapshot.CurrentSnapshot
  
                             # Make linked disk specification
-                            $cloneSpec.Location = New-Object -Typename Vmware.Vim.VirtualMachineRelocateSpec
-                            $cloneSpec.Location.Datastore = (Get-Datastore -Name $wpfcomboDatastore.SelectedItem | Get-View).MoRef
-                            $cloneSpec.Location.Transform =  [Vmware.Vim.VirtualMachineRelocateTransformation]::sparse
- 
+                            $cloneSpec.Location = New-Object -Typename VMware.Vim.VirtualMachineRelocateSpec
+                            $cloneSpec.Location.Datastore = (Get-View -VIObject $destinationDatastore).MoRef
+                            ##$cloneSpec.Location.Transform =  [Vmware.Vim.VirtualMachineRelocateTransformation]::flat ## deprecated
+                            if( $destinationDatastore.Type -ne 'VMFS' )
+                            {
+                                ## we get "The virtual disk is either corrupted or not a supported format" if NFS since it doesn't support thin disks
+                                #$cloneSpec.Location.DiskLocator = New-Object -Typename VMware.Vim.VirtualMachineRelocateSpecDiskLocator
+                                #$cloneSpec.Location.DiskLocator.diskBackingInfo = New-Object VMware.Vim.VirtualMachineRelocateSpecDiskLocatorBackingSpec
+
+                                #$cloneSpec.Location.DiskMoveType = [Vmware.Vim.VirtualMachineRelocateDiskMoveOptions]::moveAllDiskBackingsAndDisallowSharing
+                            }
+
                             $cloneName = $wpftxtBackupName.Text
  
                             $cloneFolder = (Get-Folder -Name $wpfcomboFolder.SelectedItem | Get-View).Moref
 
                             if( $backupTask = $vmView.CloneVM_Task( $cloneFolder , $cloneName , $cloneSpec ) )
                             {
+                                if( $taskStatus = Get-Task -Id $backupTask )
+                                {
+                                    if( $taskStatus.State -eq 'Error' )
+                                    {
+                                        [void][Windows.MessageBox]::Show( "Task for backup of $($vm.Name) reported error" , 'Backup Error' , 'OK' ,'Error' )
+                                    }
+                                }
                                 if( ! $WPFchkAsync.IsChecked )
                                 {
                                     $oldCursor = $backupForm.Cursor
@@ -2238,6 +2305,7 @@ Function Process-Action
                                     }
                                     else
                                     {
+                                        $result | Write-Verbose
                                         Remove-Snapshot -Snapshot $cloneSnapshot -Confirm:$false
                                     }
                                 }
@@ -2307,13 +2375,13 @@ Function Process-Action
                             Write-Verbose "Found existing mstsc process pid $($mstscProcess.ProcessId) for $address"
                             if( $windowHandle = Get-Process -Id $mstscProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle )
                             {
-                                [bool]$setForegroundWindow = [win32.user32]::ShowWindowAsync( $windowHandle , 9 ) ## restore
-                                if( ! $setForegroundWindow )
+                                if( ! ( $setForegroundWindow = Set-WindowToFront -windowHandle $windowHandle ) )
                                 {
-                                    Write-Warning "Failed to set mstsc.exe process id $($mstsc.ProcessId) window to foreground"
+                                    Write-Warning "Failed to activate mstsc.exe process id $($mstsc.ProcessId) window"
                                 }
                             }
                         }
+                        ## else we don't have an existing mstsc process launched from this PowerShell process
                     }
 
                     if( ! $setForegroundWindow )
@@ -2470,11 +2538,9 @@ Function Process-Action
                     if( $vmrcProcess )
                     {
                         Write-Verbose "Found existing vmrc process pid $($vmrcProcess.ProcessId) for $address"
-                        $windowHandle = Get-Process -Id $vmrcProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle
-                        if( $windowHandle )
+                        if( $windowHandle = Get-Process -Id $vmrcProcess.ProcessId | Select-Object -ExpandProperty MainWindowHandle )
                         {
-                            [bool]$setForegroundWindow = [win32.user32]::ShowWindowAsync( $windowHandle , 9 ) ## restore
-                            if( ! $setForegroundWindow )
+                            if( ! ( $setForegroundWindow =  Set-WindowToFront -windowHandle $windowHandle  ) )
                             {
                                 Write-Warning "Failed to set vmrc.exe process id $($vmrc.ProcessId) window to foreground"
                                 $vmrcProcess = $null
@@ -2504,13 +2570,11 @@ Function Process-Action
                                 }
                                 else
                                 {
-                                    $connection = Connect-VIServer @connectParameters
-                                    if( ! $connection )
+                                    if( ! ( $connection = Connect-VIServer @connectParameters ) )
                                     {
                                         Write-Warning "Failed to connect to VI server"
                                     }
-                                    $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
-                                    if( $session )
+                                    if( ! ( $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue ) )
                                     {
                                         $ticket = $Session.AcquireCloneTicket()
                                     }
@@ -2862,6 +2926,13 @@ Function Get-VMs
     [array]$NICs = @( Get-NetworkAdapter -VM * )
     Write-Verbose -Message "Got $($NICs.Count) NICS"
 
+    ## times are UTC so convert to local - https://devblogs.microsoft.com/scripting/powertip-convert-from-utc-to-my-local-time-zone
+    if( ! ( $currentTimeZone = (Get-CimInstance -Classname win32_timezone).StandardName ) -or ! ( $TZ = [System.TimeZoneInfo]::FindSystemTimeZoneById( $currentTimeZone ) ) )
+    {
+        Write-Warning "Unable to determine time zone"
+        $TZ = $null
+    }
+
     [array]$vms = @( VMware.VimAutomation.Core\Get-VM @params | Sort-Object -Property $script:sortProperty | . { Process
     {
         $vm = $PSItem
@@ -2888,8 +2959,8 @@ Function Get-VMs
                 'Power State' = $powerState[ $vm.PowerState.ToString() ]
                 'IP Addresses' = $IPaddresses -join ','
                 'Snapshots' = ( $snapshots | Where-Object VMId -eq $VM.Id | Measure-Object|Select-Object -ExpandProperty Count)
-                'Created' = $vm.ExtensionData.Config.CreateDate
-                'Started' = $vm.ExtensionData.Runtime.BootTime
+                'Created' = $(if( $vm.ExtensionData.Config.PSObject.Properties[ 'CreateDate'] -and $TZ ) { [System.TimeZoneInfo]::ConvertTimeFromUtc( $vm.ExtensionData.Config.CreateDate , $TZ ) } else { $vm.ExtensionData.Config.CreateDate } )
+                'Started' = $(if( $vm.ExtensionData.Runtime.BootTime -and $TZ ) { [System.TimeZoneInfo]::ConvertTimeFromUtc( $vm.ExtensionData.Runtime.BootTime  , $TZ ) } else { $vm.ExtensionData.Runtime.BootTime } )
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
                 'Network(s)' = ($thisVMsNics | Select-Object -ExpandProperty NetworkName | Sort-Object -Unique) -join ','
@@ -2949,37 +3020,38 @@ Get-Variable -Name WPF*|Select-Object -ExpandProperty Name | Write-Debug
 
 Add-Type -MemberDefinition $pinvokeCode -Name 'User32' -Namespace 'Win32' -UsingNamespace System.Text -Debug:$false
 
+$connection = $null
+
 ## see if already connected and if so if it is the server we are told to connect to
 if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyContinue )
 {
-    $existingServers = @( $global:DefaultVIServers )
-    if( $existingServers -and $existingServers.Count )
+    if( ( $existingServers = @( $global:DefaultVIServers )) -and $existingServers.Count )
     {
-        [string]$existingServer = $existingServers|Select-Object -ExpandProperty Name
-        Write-Verbose -Message "Already connected to $($existingServer -join ' , ')"
-        $server = $existingServer
         $alreadyConnected = $true
         if( ! $PSBoundParameters[ 'username' ] )
         {
             $username = $existingServers|Group-Object -Property User|Sort-Object -Property Count -Descending|Select-Object -First 1 -ExpandProperty Name
         }
-        Write-Verbose -Message "Already connected to $($existingServer -join ' , ') username $username"
+        Write-Verbose -Message "Already connected to $($existingServers.Name -join ' , ') username $username"
         ## Check not connected to same server
         [hashtable]$connections = @{}
-        ForEach( $serverConnection in $existingServer )
+        ForEach( $serverConnection in $existingServers )
         {
             try
             {
-                $dns = Resolve-DnsName -Name $serverConnection -ErrorAction SilentlyContinue -Verbose:$false
-                if( $dns )
+                if( $dns = Resolve-DnsName -Name $serverConnection.Name -ErrorAction SilentlyContinue -Verbose:$false )
                 {
                     $connections.Add( $dns.IPAddress , $serverConnection  )
+                }
+                if( ! $connection )
+                {
+                    $connection = $serverConnection
                 }
             }
             catch
             {
                 $sameServer = $connections[ $dns.IPAddress ]
-                Throw "Multiple connections to same VMware server $serverConnection and $sameServer with IP address $($dns.IPAddress)"
+                Throw "Multiple connections to same VMware server $serverConnection.Name and $sameServer with IP address $($dns.IPAddress)"
             }
         }
         Remove-Variable -Name connections
@@ -3074,6 +3146,10 @@ if( ! $alreadyConnected )
                     $credentialPromptParameters.Add( 'Username' , $username )
                 }
                 $credential = Get-Credential @credentialPromptParameters
+            }
+            elseif( $username )
+            {
+                $connectParameters.Add( 'Username' , $username )
             }
         }
     }
@@ -3179,10 +3255,10 @@ if( ! $mainForm )
 
 [array]$snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName -ErrorVariable getError )
 
-if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
+if( ($getError|Select-Object -expandproperty Exception | Select-Object -ExpandProperty Message -First 1) -match 'Not Connected'  )
 {
     Write-Warning "Not connected to $($server -join ',') so reconnecting"
-    $connectParameters|Write-Verbose
+    $connectParameters|Out-String|Write-Verbose
     if( $connection = Connect-VIServer @connectParameters )
     {
         $snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName )
@@ -3202,7 +3278,6 @@ $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
 
 $datatable = New-Object -TypeName System.Data.DataTable
 
-##[string[]]$displayedFields =  @( "Name" , "Power State" , "Host" , "Notes" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 $displayedFields = New-Object -TypeName System.Collections.Generic.List[String] 
 $displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "Network(s)" , "NICs Connected" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 If( $lastSeconds -gt 0 )
@@ -3227,7 +3302,12 @@ $WPFchkPerfData.IsChecked = $performanceData
 
 [array]$global:vms = Get-VMs -datatable $datatable -pattern $vmName -poweredOn $showPoweredOn -poweredOff $showPoweredOff -suspended $showSuspended -datastores $script:datastores
 
-$mainForm.Title += " connected to $($server -join ' , ') (v$($connection.Version) build $($connection.Build)) at $(Get-Date -Format G), $($global:vms.Count) VMs"
+$mainForm.Title += " connected to $($server -join ' , ') "
+if( $connection ) ## may already be connected in which case can't get this detail
+{
+    $mainForm.Title += "(v$($connection.Version) build $($connection.Build))"
+}
+$mainForm.Title += " at $(Get-Date -Format G), $($global:vms.Count) VMs"
 
 $WPFVirtualMachines.ItemsSource = $datatable.DefaultView
 $WPFVirtualMachines.IsReadOnly = $true
@@ -3278,11 +3358,13 @@ $WPFbtnFilter.Add_Click({
         $script:showSuspended = $wpfchkSuspended.IsChecked
         $script:vmName = $WPFtxtVMName.Text
         $getError = $null
-        $script:snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -ErrorVariable getError -VM $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }))
+        $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -ErrorVariable getError -Name $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }) | VMware.VimAutomation.Core\Get-Snapshot )
         if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
         {
-            $connection = Connect-VIServer @connectParameters
-            [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+            if( ! ( $connection = Connect-VIServer @connectParameters ) )
+            {
+                [void][Windows.MessageBox]::Show( "Server was not connected, please retry" , 'Connection Error' , 'Ok' ,'Exclamation' )
+            }
         }
         Update-Form -form $mainForm -datatable $script:datatable -vmname $script:vmName
     }
@@ -3325,6 +3407,8 @@ public class SSLHandler
 
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [SSLHandler]::GetSSLHandler()
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+
+$mainForm.Topmost = $topMost
 
 $result = $mainForm.ShowDialog()
 
@@ -3374,8 +3458,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUPOKOk+sKWtQJyw5lLa42RvBN
-# eeygggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUkWjCDXQXODjbuRvacyLH0MyF
+# HS2gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3436,11 +3520,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFH+Kby6bdnydwZNbi/F4
-# UvnWr8DVMA0GCSqGSIb3DQEBAQUABIIBAI7fhs8+8wBUHI8+HhX+tNK5Q9msM1hz
-# GwbWBjJxgpgGKv7R5ogK1Uhb2rNx4UqnJKD4IB7re/zLdbosDRktk3/zRma4tUDJ
-# TF7dGMrMcUepLiE58vyZHM699CFKA6LLlwFruVGL3C7+Y4mN4IavBkwZG6KG3VWm
-# P2l7tTuA6JHLWGyvGWAbe1W/rfvIvrELgfHSMfFHUTsyvaD44XEQYUYs2Z+ke0Tn
-# T7UGAh6RESi7KhTyiVhFc9GF0KzBhjHB2Z5c0FLRQk4H+RTYHOIqmlHBl8OcjImM
-# +mWUWmWMq/sD2IsAxvGZMsa8A7WAz+ySoitd5NUdirDlTgMuFrhvUSU=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFGzpqL1YwKOLqAgy5qZU
+# 1/kg3hOLMA0GCSqGSIb3DQEBAQUABIIBABNwrWCuI61pQlKArTIZJJQ3hczP5/GC
+# oXj+nQeOeu/y9LS52DyGG5xiRpaJBLHgiGMDDEERdf/TLyGq6pDOedsVCTF9hci2
+# CpjljjTR4D4AWgKq6lPlIdxJskdRf+ayl/U3c8ExlK2fU01x3sfqTqTpT5X1WGkW
+# 0JPys0WIQrV4d7yOZDdrsU1nAGy3vPmnTpqe8ykszbdmS0xkZqMAt0ycrOKCxaiP
+# ZPpSkwm74kPKstIiGnf6XvXIuKrRPA50A0yV9bZuAGs4dJI7SU9iLi+ERdWk34rC
+# +W3N8G723oFPHjHmtLatTkikzvA40D35i9zYlSjxLK7U52lvaEL+gWI=
 # SIG # End signature block
