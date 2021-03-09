@@ -55,6 +55,9 @@
     @guyrleech 11/09/2020  Changed create and start dates from UTC to local time
     @guyrleech 08/12/2020  Fixed code to bring existing mstsc & console windows to front
                            Added -topMost argument to keep window on top of all others
+    @guyrleech 16/12/2020  Added New VM functionality
+    @guyrleech 17/12/2020  Fixed errors coming from 6.0 vCenter
+    @guyrleech 18/12/2020  Added async thread for checking async task status
 #>
 
 <#
@@ -130,6 +133,10 @@ Do not create an .rdp file to specify the username for mstsc
 
 Always create a new mstsc process otherwise it will find an existing one for that VM and restore the window
 
+.PARAMETER pollPeriodSeconds
+
+Frequency of checking status of any async tasks such as creating a new VM
+
 .PARAMETER showPoweredOn
 
 Include powered on VMs in the GUI display
@@ -196,6 +203,7 @@ Param
     [ValidateSet('mstsc','MstscNew','console','PowerOn','reconfigure','snapshots','Delete','backup','ConnectCD','DisconnectCD','UpdateTools','RunScript','Events','MstscNew','LatestSnapshotRevert','ScreenShot','NameToClipboard','Explore')]
     [string]$doubleClick = 'mstsc',
     [switch]$saveCredentials ,
+    [double]$pollPeriodSeconds = 10 ,
     [switch]$ipv6 ,
     [switch]$passThru ,
     [string]$consoleBrowser ,
@@ -269,11 +277,12 @@ $pinvokeCode = @'
         mc:Ignorable="d"
         Title="Simple VMware Console (SVC) by @guyrleech" Height="500" Width="1000">
     <DockPanel Margin="10,10,-70,2" HorizontalAlignment="Left" >
-        <Button x:Name="btnHosts" Content="_Hosts" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
-        <Button x:Name="btnFilter" Content="_Filter" HorizontalAlignment="Left" Height="35" Margin="247,0,0,-35" VerticalAlignment="Bottom" Width="145" DockPanel.Dock="Bottom"/>
-        <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="35" Margin="500,0,0,-35" Width="145" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
-        <Button x:Name="btnDatastores" Content="_Datastores" HorizontalAlignment="Left" Height="35" Margin="690,0,0,-35" Width="145" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
-        <CheckBox x:Name="chkPerfData" Content="_Performance Data" HorizontalAlignment="Left" Height="35" Margin="850,0,0,-35" Width="150" VerticalAlignment="Bottom" DockPanel.Dock="Bottom"/>
+        <Button x:Name="btnHosts" Content="_Hosts" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="135" DockPanel.Dock="Bottom"/>
+        <Button x:Name="btnFilter" Content="_Filter" HorizontalAlignment="Left" Height="35" Margin="200,0,0,-35" VerticalAlignment="Bottom" Width="135" DockPanel.Dock="Bottom"/>
+        <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="35" Margin="540,0,0,-35" Width="135" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
+        <Button x:Name="btnNew" Content="_New" HorizontalAlignment="Left" Height="35" Margin="370,0,0,-35" Width="137" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
+        <Button x:Name="btnDatastores" Content="_Datastores" HorizontalAlignment="Left" Height="35" Margin="690,0,0,-35" Width="135" VerticalAlignment="Bottom" DockPanel.Dock="Bottom" />
+        <CheckBox x:Name="chkPerfData" Content="_Performance Data" HorizontalAlignment="Left" Height="35" Margin="850,0,0,-35" Width="135" VerticalAlignment="Bottom" DockPanel.Dock="Bottom"/>
         <DataGrid HorizontalAlignment="Stretch" VerticalAlignment="Top" x:Name="VirtualMachines" >
             <DataGrid.ContextMenu>
                 <ContextMenu>
@@ -314,6 +323,36 @@ $pinvokeCode = @'
             </DataGrid.ContextMenu>
         </DataGrid>
     </DockPanel>
+</Window>
+'@
+
+[string]$newVMXAML = @'
+<Window x:Class="VMWare_GUI.New_VM"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="New VM from Template" Height="536.922" Width="800">
+    <Grid>
+        <TextBox x:Name="textboxNewVMName" HorizontalAlignment="Left" Height="34" Margin="197,33,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300"/>
+        <TextBox x:Name="textboxNewVMDescription" HorizontalAlignment="Left" Height="34" Margin="197,91,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300" SpellCheck.IsEnabled="True"/>
+        <ComboBox x:Name="comboboxTemplate" HorizontalAlignment="Left" Height="34" Margin="197,160,0,0" VerticalAlignment="Top" Width="300"/>
+        <ComboBox x:Name="comboboxCustomisation" HorizontalAlignment="Left" Height="34" Margin="197,229,0,0" VerticalAlignment="Top" Width="300"/>
+        <ComboBox x:Name="comboboxResourcePool" HorizontalAlignment="Left" Height="34" Margin="197,285,0,0" VerticalAlignment="Top" Width="300"/>
+        <ComboBox x:Name="comboboxLocation" HorizontalAlignment="Left" Height="34 " Margin="197,348,0,0" VerticalAlignment="Top" Width="300"/>
+        <CheckBox x:Name="checkboxStartNewVM" Content="_Start" HorizontalAlignment="Left" Height="16" Margin="197,405,0,0" VerticalAlignment="Top" Width="117" IsChecked="True"/>
+        <CheckBox x:Name="checkboxNewVMAsync" Content="Create As_ync" HorizontalAlignment="Left" Height="16" Margin="288,405,0,0" VerticalAlignment="Top" Width="117" IsChecked="True"/>
+        <Label Content="Name" HorizontalAlignment="Left" Height="36" Margin="26,42,0,0" VerticalAlignment="Top" Width="127"/>
+        <Button x:Name="btnNewVMOK" Content="OK" HorizontalAlignment="Left" Height="34" Margin="18,448,0,0" VerticalAlignment="Top" Width="176" IsDefault="True"/>
+        <Button x:Name="btnNewVMCancel" Content="Cancel" HorizontalAlignment="Left" Height="38" Margin="225,448,0,0" VerticalAlignment="Top" Width="176" IsCancel="True"/>
+        <Label Content="Template" HorizontalAlignment="Left" Height="34" Margin="26,161,0,0" VerticalAlignment="Top" Width="128"/>
+        <Label Content="Customisation" HorizontalAlignment="Left" Height="34" Margin="26,232,0,0" VerticalAlignment="Top" Width="124"/>
+        <Label Content="Resource pool" HorizontalAlignment="Left" Height="34" Margin="26,285,0,0" VerticalAlignment="Top" Width="124" RenderTransformOrigin="0.532,1.96"/>
+        <Label Content="Location" HorizontalAlignment="Left" Height="34" Margin="26,348,0,0" VerticalAlignment="Top" Width="124"/>
+        <Label Content="Description" HorizontalAlignment="Left" Height="34" Margin="26,100,0,0" VerticalAlignment="Top" Width="127"/>
+        </Grid>
 </Window>
 '@
 
@@ -1805,6 +1844,134 @@ ConvertTo-VMwareFolderPath
     $result
 }
 
+Function New-VirtualMachine
+{
+    Param
+    (
+        $GUIobject
+    )
+    
+    if( $newVMForm = New-Form -inputXaml $newVMXAML )
+    {
+        Get-Template | Sort-Object -Property Name | ForEach-Object `
+        {
+            $WPFcomboboxTemplate.Items.Add( $_.Name )
+        }
+
+        $WPFcomboboxCustomisation.Items.Add( '<None>' )
+
+        Get-OSCustomizationSpec | Sort-Object -Property Name | ForEach-Object `
+        {
+            $WPFcomboboxCustomisation.Items.Add( $_.Name )
+        }
+        
+        Get-ResourcePool | Sort-Object -Property Name | ForEach-Object `
+        {
+            $WPFcomboboxResourcePool.Items.Add( $_.Name )
+        }
+        
+        Get-Folder -Type VM | Sort-Object -Property Name | ForEach-Object `
+        {
+            $WPFcomboboxLocation.Items.Add( $_.Name )
+        }
+
+        $WPFbtnNewVMOK.Add_Click({
+            $_.Handled = $true
+            if( [string]::IsNullOrEmpty( $WPFtextboxNewVMName.Text.Trim() ) )
+            {
+                [void][Windows.MessageBox]::Show( "Must enter a name for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
+            }
+            elseif( Get-VM -Name $WPFtextboxNewVMName.Text.Trim() -ErrorAction SilentlyContinue )
+            {
+                [void][Windows.MessageBox]::Show( "VM `"$($WPFtextboxNewVMName.Text)`" already exists" , 'New VM Error' , 'Ok' ,'Error' )
+            }
+            elseif( ! $WPFcomboboxTemplate.SelectedItem )
+            {
+                [void][Windows.MessageBox]::Show( "Must select the template for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
+            }
+            elseif( ! $WPFcomboboxResourcePool.SelectedItem )
+            {
+                [void][Windows.MessageBox]::Show( "Must select the resource pool for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
+            }
+            ## else others can be null
+            else
+            {
+                $newVMForm.DialogResult = $true 
+                $newVMForm.Close()
+            }})
+
+        $WPFtextboxNewVMName.Focus()
+
+        if( $newVMForm.ShowDialog() )
+        {
+            <#  new-vm -Template (Get-Template -Name "Server2019_Template_May20") -Name GLCTXWEM01 -Description "Citrix WEM 2012" -OSCustomizationSpec (Get-OSCustomizationSpec -Name guyrleech.local) 
+                    -ResourcePool (Get-ResourcePool|select -first 1) -Location (Get-Folder -Name "Citrix") | Start-VM
+            #>
+            [hashtable]$newVMparameters = @{ 
+                Name = $WPFtextboxNewVMName.Text.Trim()
+                Template = (Get-Template -Name $WPFcomboboxTemplate.SelectedItem)
+                ResourcePool = (Get-ResourcePool -Name $WPFcomboboxResourcePool.SelectedItem)
+                RunAsync = $WPFcheckboxNewVMAsync.IsChecked }
+
+            if( $WPFcomboboxLocation.SelectedItem )
+            {
+                ## TODO deal with more than 1 level deep
+                $newVMparameters.Add( 'Location' , (Get-Folder -Name $WPFcomboboxLocation.SelectedItem) )
+            }
+            if( ! [string]::IsNullOrEmpty( $WPFtextboxNewVMDescription.Text.Trim() ) )
+            {
+                $newVMparameters.Add( 'Description' , $WPFtextboxNewVMDescription.Text.Trim() )
+            }
+            if( $WPFcomboboxCustomisation.SelectedItem -and $WPFcomboboxCustomisation.SelectedItem -ne '<None>' )
+            {
+                $newVMparameters.Add( 'OSCustomizationSpec' , (Get-OSCustomizationSpec -Name $WPFcomboboxCustomisation.SelectedItem)  )
+            }
+
+            $oldCursor = $(if( $GUIobject )
+                            {
+                                $GUIobject.Cursor
+                                $GUIobject.Cursor = [Windows.Input.Cursors]::Wait
+                            })
+            Try
+            {
+                $newVM = New-VM @newVMparameters
+            }
+            Catch
+            {
+                $newVM = $null
+                Write-Error -Message $_.Exception
+            }
+
+            if( $GUIobject )
+            {
+                $GUIobject.Cursor = $oldCursor ## will set default if not set
+            }
+
+            if( ! $newVM )
+            {
+                [void][Windows.MessageBox]::Show( "Failed to create new VM `"$($newVMparameters[ 'Name' ])`"" , 'New VM Error' , 'Ok' ,'Error' )
+            }
+            elseif( $newVMparameters.RunAsync )
+            {
+                ## Add object which has start details so can start when finished if requested
+                $script:AsyncTasks.Add( ([pscustomobject]@{ 'TaskId' = $newVM.Id ; 'VM Name' = $newVMparameters.Name ; 'Start' = $WPFcheckboxStartNewVM.IsChecked } ))
+            }
+            else
+            {
+                if( ( $started = Start-VM -VM $newVMparameters[ 'Name' ] -Confirm:$false ) -and $started.PowerState -eq 'PoweredOn' )
+                {
+                    $additional = ' & started ok'
+                }
+                else
+                {
+                    $additional = ' & failed to start'
+                }
+                [void][Windows.MessageBox]::Show( "`"$($newVMparameters[ 'Name' ])`" created$additional" , 'New VM Succeeded' , 'Ok' ,'Information' )
+            }
+        }
+    }
+}
+
 Function Process-Action
 {
     Param
@@ -2309,7 +2476,11 @@ Function Process-Action
                                         Remove-Snapshot -Snapshot $cloneSnapshot -Confirm:$false
                                     }
                                 }
-                                ## else async so cannot remove snapshot as in use
+                                else
+                                {
+                                    ## Add object which has start details so can start when finished if requested
+                                    $script:AsyncTasks.Add( ([pscustomobject]@{ 'TaskId' = $backupTask ; 'VM Name' = $vm.Name ; 'Backup VM' = $cloneName } ))
+                                }
                             }
                             else
                             {
@@ -2447,7 +2618,7 @@ Function Process-Action
                         ## See if we have a stored credential for this and if so only create .rdp file if extraRDPSettings set
                         [string]$storedCredential = cmdkey.exe /list:TERMSRV/$address | Where-Object { $_ -match 'User:' }
                         [string]$thisRdpFileName = $rdpFileName
-                        if( $storedCredential )
+                        if( $rdpExtrasFileName )
                         {
                             Write-Verbose "Got stored credential `"$storedCredential`" for $address"
                             $thisRdpFileName = $rdpExtrasFileName
@@ -2959,7 +3130,7 @@ Function Get-VMs
                 'Power State' = $powerState[ $vm.PowerState.ToString() ]
                 'IP Addresses' = $IPaddresses -join ','
                 'Snapshots' = ( $snapshots | Where-Object VMId -eq $VM.Id | Measure-Object|Select-Object -ExpandProperty Count)
-                'Created' = $(if( $vm.ExtensionData.Config.PSObject.Properties[ 'CreateDate'] -and $TZ ) { [System.TimeZoneInfo]::ConvertTimeFromUtc( $vm.ExtensionData.Config.CreateDate , $TZ ) } else { $vm.ExtensionData.Config.CreateDate } )
+                'Created' = $(if( $vm.ExtensionData.Config.PSObject.Properties[ 'CreateDate'] ) { if( $TZ ) { [System.TimeZoneInfo]::ConvertTimeFromUtc( $vm.ExtensionData.Config.CreateDate , $TZ ) } else { $vm.ExtensionData.Config.CreateDate } })
                 'Started' = $(if( $vm.ExtensionData.Runtime.BootTime -and $TZ ) { [System.TimeZoneInfo]::ConvertTimeFromUtc( $vm.ExtensionData.Runtime.BootTime  , $TZ ) } else { $vm.ExtensionData.Runtime.BootTime } )
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
@@ -2967,9 +3138,9 @@ Function Get-VMs
                 'NICs connected' = "{0}/{1}" -f ($thisVMsNics.Where( { $_.ConnectionState.Connected } ) | Measure-Object | Select-Object -ExpandProperty Count) , $thisVMsNics.Count
                 'Memory (GB)' = $vm.MemoryGB
                 'Guest OS' = $(If( $vm.Guest -and $vm.Guest.OSFullName ) { $vm.Guest.OSFullName } Else { $vm.GuestId })
-                'HW Version' = $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1'
+                'HW Version' = $(if( $vm.PSObject.Properties[ 'HardwareVersion'] ) { $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1' } )
                 'VMware Tools' = $vm.Guest.ToolsVersion
-            }
+                }
 
             if( $lastSeconds -gt 0 -and $WPFchkPerfData.IsChecked -and $vm.PowerState -eq 'PoweredOn' )
             {
@@ -3350,6 +3521,10 @@ $WPFbtnHosts.Add_Click({
     $_.Handled = $true
     Show-HostsWindow
 })
+$WPFbtnNew.Add_Click({
+    $_.Handled = $true
+    New-VirtualMachine -GUIobject $mainForm
+})
 $WPFbtnFilter.Add_Click({
     if( Set-Filters -name $vmName )
     {
@@ -3408,9 +3583,86 @@ public class SSLHandler
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [SSLHandler]::GetSSLHandler()
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
+## code run every x seconds to check on state of any async jobs
+[scriptblock]$timerBlock = `
+{
+    if( $script:AsyncTasks -and $script:AsyncTasks.Count )
+    {
+        Write-Verbose "Timer @ $(Get-Date -Format G) - $($script:AsyncTasks.Count) tasks running"
+        For( [int]$index = $script:AsyncTasks.Count - 1 ; $index -ge 0 ; $index-- )
+        {
+            if( $task = Get-Task -Id $script:AsyncTasks[ $index ].TaskId )
+            {
+                if( $task.State -ne 'Running' )
+                {
+                    if( $task.State -eq 'Error' )
+                    {
+                        [void][Windows.MessageBox]::Show( "$($task.Description) of `"$($script:AsyncTasks[ $index ].'VM Name')`" gave `"$($task.extensiondata.info.Error.LocalizedMessage)`"" , 'Task Failed' , 'Ok' ,'Error' )
+
+                        if( $task.Name -eq 'CloneVM_Task' -and ( $answer = [Windows.MessageBox]::Show( "Delete `"$($script:AsyncTasks[ $index ].'VM Name')`" ?" , 'Task Failure Tidyup' , 'YesNo' ,'Question' ) ) -eq 'Yes' )
+                        {
+                            Remove-VM -DeletePermanently -VM $script:AsyncTasks[ $index ].'VM Name' -Confirm:$false
+                        }
+                    }
+                    elseif( $null -ne $script:AsyncTasks[ $index ].PSObject.Properties[ 'Start' ] )
+                    {
+                        [string]$additional = $null
+                        if( $script:AsyncTasks[ $index ].Start )
+                        {
+                            if( ( $started = Start-VM -VM $script:AsyncTasks[ $index ].'VM Name' -Confirm:$false ) -and $started.PowerState -eq 'PoweredOn' )
+                            {
+                                $additional = ' & started ok'
+                            }
+                            else
+                            {
+                                $additional = ' & failed to start'
+                            }
+                        }
+                        [void][Windows.MessageBox]::Show( "$($task.Description) of `"$($script:AsyncTasks[ $index ].'VM Name')`"$additional" , 'Task Completed Ok' , 'Ok' ,'Information' )
+                    }
+                    $script:AsyncTasks.RemoveAt( $index )
+                }
+                else
+                {
+                    ##Write-Verbose -Message "$(Get-Date -Format G): task $($task.Name) is $($task.PercentComplete)% complete"
+                }
+            }
+            else
+            {
+                Write-Error -Message "Failed to get status of task $($script:AsyncTasks[ $index ])"
+                $script:AsyncTasks.RemoveAt( $index )
+            }
+        }
+    }
+}
+
+$script:AsyncTasks = New-Object -TypeName System.Collections.Generic.List[psobject]
+
+## https://richardspowershellblog.wordpress.com/2011/07/07/a-powershell-clock/
+## background thread so we can check on status of async tasks and report when done
+$script:formTimer = $null ## make script global so we can stop it as confuses PowerShell ISE
+
+$mainForm.Add_SourceInitialized({
+    if( $script:formTimer = New-Object -TypeName System.Windows.Threading.DispatcherTimer )
+    {
+        $script:formTimer.Interval = [Timespan]::FromSeconds( $pollPeriodSeconds )
+        $script:formTimer.add_Tick( $timerBlock )
+        $script:formTimer.Start()
+    }
+})
+
 $mainForm.Topmost = $topMost
 
 $result = $mainForm.ShowDialog()
+
+if( $script:formTimer )
+{
+    $script:formTimer.Stop()
+    $script:formTimer.remove_Tick( $timerBlock )
+    $script:formTimer = $null
+    $timerBlock = $null
+    Remove-Variable -Name timerBlock -Force -Confirm:$false
+}
 
 ## if we have run history then save to registry
 if( $global:scriptHistory -and $global:scriptHistory.Count )
@@ -3458,8 +3710,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUkWjCDXQXODjbuRvacyLH0MyF
-# HS2gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUTP6RFFmI5MxZRX3TafUIrB+Q
+# ORygggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3520,11 +3772,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFGzpqL1YwKOLqAgy5qZU
-# 1/kg3hOLMA0GCSqGSIb3DQEBAQUABIIBABNwrWCuI61pQlKArTIZJJQ3hczP5/GC
-# oXj+nQeOeu/y9LS52DyGG5xiRpaJBLHgiGMDDEERdf/TLyGq6pDOedsVCTF9hci2
-# CpjljjTR4D4AWgKq6lPlIdxJskdRf+ayl/U3c8ExlK2fU01x3sfqTqTpT5X1WGkW
-# 0JPys0WIQrV4d7yOZDdrsU1nAGy3vPmnTpqe8ykszbdmS0xkZqMAt0ycrOKCxaiP
-# ZPpSkwm74kPKstIiGnf6XvXIuKrRPA50A0yV9bZuAGs4dJI7SU9iLi+ERdWk34rC
-# +W3N8G723oFPHjHmtLatTkikzvA40D35i9zYlSjxLK7U52lvaEL+gWI=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFLrv7Un+584mIyLzBjbX
+# s9BCWg0tMA0GCSqGSIb3DQEBAQUABIIBAFzGGKcDEJ3iBgFtfBuf+jJq5fHxEg2Q
+# 3rzsFbNGuSbCoh47xKpxTrmaALFzLFj0uzT2aN1QFPhGiC0KHf37LxfrLotV99hK
+# 9TTli6wuRWUG8sDu0vgZXcJ8092cVAcntuLfu84kfUTNwwu1iLCAOxssbfg5ALl+
+# h0RI2JqxOXuj91h9HotJiJmLqQq9LoxuzsUNbJoGburLBdoIqNTlBtJxoI4FrK+K
+# BBbWpEVy0ECI5+QmE77bwJjI+vJB8v9uS5UPvY/763sr0B+/g0S3MYQ5sK7zUs0j
+# MSNTrYOtdpRH/VeGOpFw5E1HOF55K56yMtcplQKFXvUf3W0PXRQZGZg=
 # SIG # End signature block
