@@ -58,6 +58,7 @@
     @guyrleech 16/12/2020  Added New VM functionality
     @guyrleech 17/12/2020  Fixed errors coming from 6.0 vCenter
     @guyrleech 18/12/2020  Added async thread for checking async task status
+    @guyrleech 30/03/2021  Fixed lack of folder structure for new VM location drop down
 #>
 
 <#
@@ -1869,11 +1870,51 @@ Function New-VirtualMachine
         {
             $WPFcomboboxResourcePool.Items.Add( $_.Name )
         }
-        
-        Get-Folder -Type VM | Sort-Object -Property Name | ForEach-Object `
+
+        [hashtable]$folderIdToName = @{}
+        [hashtable]$fullpathToFolderId = @{}
+
+        Get-Folder -Type VM | ForEach-Object `
         {
-            $WPFcomboboxLocation.Items.Add( $_.Name )
+            if( $_.ParentId -notmatch '^Folder' )
+            {
+                ## Change the root from 'vm' to '' as parentId will not be Folder-Group-*
+                $_.PSObject.properties.remove('Name')
+                Add-Member -InputObject $_ -MemberType NoteProperty -Name Name -Value '' -Force
+            }
+            $folderIdToName.Add( $_.Id , $_ )
         }
+        
+        [string]$fullPathName = $null
+
+        Get-Folder -Type VM | ForEach-Object `
+        {
+            ## construct the full path to this folder by traversing up the parents
+            $folder = $_
+            if( $folder.ParentId -notmatch '^Folder' )
+            {
+                $fullPathName = '/'
+            }
+            else
+            {
+                $fullPathName = $folder.Name
+            }
+            $parent = $folder.ParentId
+            while( $parent )
+            {
+                if( $parentFolder = $folderIdToName[ $parent ] )
+                {
+                    $fullPathName =  $parentFolder.Name + "/$fullPathName"
+                    $parent = $parentFolder.ParentId
+                }
+                else
+                {
+                    $parent = $null
+                }
+            }
+            $fullpathToFolderId.Add( $fullPathName , $folder ) ## so we can map the chosen folder name back to an id
+            $fullPathName
+        } | Sort-Object | ForEach-Object { $WPFcomboboxLocation.Items.Add( $_ ) }
 
         $WPFbtnNewVMOK.Add_Click({
             $_.Handled = $true
@@ -1915,8 +1956,14 @@ Function New-VirtualMachine
 
             if( $WPFcomboboxLocation.SelectedItem )
             {
-                ## TODO deal with more than 1 level deep
-                $newVMparameters.Add( 'Location' , (Get-Folder -Name $WPFcomboboxLocation.SelectedItem) )
+                if( $folder = $fullpathToFolderId[ $WPFcomboboxLocation.SelectedItem ] )
+                {
+                    $newVMparameters.Add( 'Location' , $folder )
+                }
+                else
+                {
+                    Write-Warning -Message "Failed to find id for folder $($WPFcomboboxLocation.SelectedItem)"
+                }
             }
             if( ! [string]::IsNullOrEmpty( $WPFtextboxNewVMDescription.Text.Trim() ) )
             {
@@ -3710,8 +3757,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUTP6RFFmI5MxZRX3TafUIrB+Q
-# ORygggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUuQAgCH8SsQM7Yb5bUrv9ihOK
+# qQSgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3772,11 +3819,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFLrv7Un+584mIyLzBjbX
-# s9BCWg0tMA0GCSqGSIb3DQEBAQUABIIBAFzGGKcDEJ3iBgFtfBuf+jJq5fHxEg2Q
-# 3rzsFbNGuSbCoh47xKpxTrmaALFzLFj0uzT2aN1QFPhGiC0KHf37LxfrLotV99hK
-# 9TTli6wuRWUG8sDu0vgZXcJ8092cVAcntuLfu84kfUTNwwu1iLCAOxssbfg5ALl+
-# h0RI2JqxOXuj91h9HotJiJmLqQq9LoxuzsUNbJoGburLBdoIqNTlBtJxoI4FrK+K
-# BBbWpEVy0ECI5+QmE77bwJjI+vJB8v9uS5UPvY/763sr0B+/g0S3MYQ5sK7zUs0j
-# MSNTrYOtdpRH/VeGOpFw5E1HOF55K56yMtcplQKFXvUf3W0PXRQZGZg=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFN2h574PM8OqWCo3ptjY
+# L2Z/dYMFMA0GCSqGSIb3DQEBAQUABIIBAAC1N73GppcyfR3q5B02CKSGbFKHSqJ3
+# PBm35Cz8InQojEjT2pU8wE0rvUCwy5mpZllsY42O11rSKUdO3AxPra95UpwvgoUa
+# 6DrTGPAc/kPRdOgNXHPPFdos/+WGFabN2FkGI732FCOZIkzRvjtShQIXUXNCEcsV
+# OhRM7Vo/3Jim/IsSmp9sfKIzujlBfJUmxLe25gO0Y/skoUWuVaWmPDSW36QHvxNi
+# OgOLi6PCNH7QDVkJLbNlyLVmHNDkm8EWTxa3tdkxP8EzY9OYgYFPK+25lyXGtv9g
+# 2TbUXzqmpl6keVY9Ebe40Azm8UPXHkUYfu0B+h6XpiyZthD1XJJT+Dg=
 # SIG # End signature block
