@@ -59,6 +59,7 @@
     @guyrleech 17/12/2020  Fixed errors coming from 6.0 vCenter
     @guyrleech 18/12/2020  Added async thread for checking async task status
     @guyrleech 30/03/2021  Fixed lack of folder structure for new VM location drop down
+    @guyrleech 01/06/2021  Added "Crashed" column
 #>
 
 <#
@@ -3185,6 +3186,7 @@ Function Get-VMs
                 'NICs connected' = "{0}/{1}" -f ($thisVMsNics.Where( { $_.ConnectionState.Connected } ) | Measure-Object | Select-Object -ExpandProperty Count) , $thisVMsNics.Count
                 'Memory (GB)' = $vm.MemoryGB
                 'Guest OS' = $(If( $vm.Guest -and $vm.Guest.OSFullName ) { $vm.Guest.OSFullName } Else { $vm.GuestId })
+                'Crashed' = $(if( $vm.ExtensionData.Guest ) { $vm.ExtensionData.Guest.GuestKernelCrashed }) 
                 'HW Version' = $(if( $vm.PSObject.Properties[ 'HardwareVersion'] ) { $vm.HardwareVersion -replace 'vmx-(\d*)$', '$1' } )
                 'VMware Tools' = $vm.Guest.ToolsVersion
                 }
@@ -3497,7 +3499,7 @@ $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
 $datatable = New-Object -TypeName System.Data.DataTable
 
 $displayedFields = New-Object -TypeName System.Collections.Generic.List[String] 
-$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "Network(s)" , "NICs Connected" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
+$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "Network(s)" , "NICs Connected" , "IP Addresses" , "VMware Tools" , "HW Version" , "Guest OS" , "Crashed" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 If( $lastSeconds -gt 0 )
 {
     $displayedFields += @( 'Mem Usage Average','Cpu Usagemhz Average','Net Usage Average','Cpu Usage Average','Disk Usage Average' )
@@ -3757,8 +3759,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUuQAgCH8SsQM7Yb5bUrv9ihOK
-# qQSgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU5YOJ26KaVd/TEMTyn4oPu0uC
+# 4+WgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3819,11 +3821,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFN2h574PM8OqWCo3ptjY
-# L2Z/dYMFMA0GCSqGSIb3DQEBAQUABIIBAAC1N73GppcyfR3q5B02CKSGbFKHSqJ3
-# PBm35Cz8InQojEjT2pU8wE0rvUCwy5mpZllsY42O11rSKUdO3AxPra95UpwvgoUa
-# 6DrTGPAc/kPRdOgNXHPPFdos/+WGFabN2FkGI732FCOZIkzRvjtShQIXUXNCEcsV
-# OhRM7Vo/3Jim/IsSmp9sfKIzujlBfJUmxLe25gO0Y/skoUWuVaWmPDSW36QHvxNi
-# OgOLi6PCNH7QDVkJLbNlyLVmHNDkm8EWTxa3tdkxP8EzY9OYgYFPK+25lyXGtv9g
-# 2TbUXzqmpl6keVY9Ebe40Azm8UPXHkUYfu0B+h6XpiyZthD1XJJT+Dg=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFI5qC2yQFN4swAqOXHWZ
+# fkNVWV2rMA0GCSqGSIb3DQEBAQUABIIBAELGyzevHxpgGr2/Cjrt00ruAHg0DV5A
+# 4RHKkUuLdduBkBDfeSmANhGfzGfN+VVztEY5EZBuMaDLhnu+V4NStP73pLpPkEZ9
+# NZ8zro2FASjjtXc6gu8YdVd0is0sFkloi1MmP67q4WmpL7R+KyY2MA2gIfS4ZwOn
+# Y6gA48TYnnkF3agZIaU8+wSncn5nLd3iqa380xetIRP0UucX+5FO08ENHusZkZ8l
+# dkiduXMmJCJNwKqVIMsD/GGGCkFsqQSpD9E71Y/ukKSnWKFi+Z41Pw+yKs/HU/+4
+# eAUvhdfZY73NhtFLWpl6mj8m6U81XRhxR+Uf+dOtvngPWAjQS1kghZg=
 # SIG # End signature block
