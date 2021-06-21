@@ -61,6 +61,8 @@
     @guyrleech 30/03/2021  Fixed lack of folder structure for new VM location drop down
     @guyrleech 01/06/2021  Added "Crashed" column
     @guyrleech 16/06/2021  Added "Tools Status" column
+                           Added delete all option for deleting & power operations on VMs
+    @guyrleech 21/06/2021  Added "NICs" column
 #>
 
 <#
@@ -191,6 +193,18 @@ The latest VMware PowerCLI module required by the script can be installed if you
 
 RDP file settings for -extraRDPSettings option available at https://docs.microsoft.com/en-us/windows-server/remote/remote-desktop-services/clients/rdp-files
 
+#>
+
+<#
+Copyright © 2021 Guy Leech
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, 
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #>
 
 [CmdletBinding()]
@@ -2191,7 +2205,7 @@ Function Process-Action
                 {
                     if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
                     {
-                        $answer = [Windows.MessageBox]::Show( "Are you sure you want to run the script on $($selectedVMs.Count - $loopIterations + 1) VMs.`n Yes for All, No for just $($VM.Name) or Cancel for none" , "Confirm Run Script Operation" , 'YesNoCancel' ,'Question' )
+                        $answer = [Windows.MessageBox]::Show( "Are you sure you want to run the script on $($selectedVMs.Count - $loopIterations + 1) VMs.`n Yes for All, No for $($VM.Name) Only or Cancel for None" , "Confirm Run Script Operation" , 'YesNoCancel' ,'Question' )
                     }
                     if( $answer -eq 'Cancel' )
                     {
@@ -2842,12 +2856,31 @@ Function Process-Action
             }
             elseif( ( $powerCmdlet = $powerOperation[ $Operation ] ) )
             {
-                [string]$answer = 'yes'
-                if( $Operation -ne 'PowerOn' )
+                if( $Operation -eq 'PowerOn' )
                 {
-                    $answer = [Windows.MessageBox]::Show( "Are you sure you want to $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($vm.Name)?" , 'Confirm Power Operation' , 'YesNo' ,'Question' )
+                    $answer = 'yes'
                 }
-                if( $answer -eq 'yes' )
+                elseif ( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
+                {
+                    [string]$buttons = 'YesNo'
+                    [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
+                    {
+                        "Are you sure you want to $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($VM.Name) Only or Cancel for None"
+                        $buttons = 'YesNoCancel'
+                    }
+                    else
+                    {
+                        "Are you sure you want to delete $($vm.Name)?"
+                    })
+                    $answer = [Windows.MessageBox]::Show( $prompt , 'Confirm Power Operation' , $buttons ,'Question' )
+                }
+        
+                if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'cancel' )
+                {
+                    $answer = $null
+                    return
+                }
+                elseif( $answer -eq 'yes' -or ( $selectedVMs.Count -gt 1 -and $answer -eq 'no' ))
                 {
                     $command = Get-Command -Module VMware.VimAutomation.Core -Name $powerCmdlet
                     if( $command )
@@ -3060,8 +3093,27 @@ Function Process-Action
             }            
             elseif( $Operation -eq 'Delete' )
             {
-                [string]$answer = [Windows.MessageBox]::Show( "Are you sure you want to delete $($vm.Name)?" , 'Confirm Delete Operation' , 'YesNo' ,'Question' )
-                if( $answer -eq 'yes' )
+                ## if not prompted before or previouus answer was "no" (so only deleting one at a time), prompt user
+                if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
+                {
+                    [string]$buttons = 'YesNo'
+                    [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
+                    {
+                        "Are you sure you want to delete $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($VM.Name) Only or Cancel for None"
+                        $buttons = 'YesNoCancel'
+                    }
+                    else
+                    {
+                        "Are you sure you want to delete $($vm.Name)?"
+                    })
+                    $answer = [Windows.MessageBox]::Show( $prompt , 'Confirm Delete Operation' , $buttons ,'Question' )
+                }
+                if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'Cancel' )
+                {
+                    $answer = $null
+                    return
+                }
+                elseif( $answer -eq 'Yes' -or ( $selectedVMs.Count -gt 1 -and $answer -eq 'No' ))
                 {
                     VMware.VimAutomation.Core\Remove-VM -DeletePermanently -VM $vm -Confirm:$false
                 }
@@ -3184,6 +3236,7 @@ Function Get-VMs
                 'Used Space (GB)' = [Math]::Round( $vm.UsedSpaceGB , 1 )
                 'Datastore(s)' = ($vm.DatastoreIdList | ForEach-Object { $datastores[ $PSItem ] }) -join ','
                 'Network(s)' = ($thisVMsNics | Select-Object -ExpandProperty NetworkName | Sort-Object -Unique) -join ','
+                'NICs' = ($thisVMsNics | Select-Object -ExpandProperty Type | Sort-Object -Unique) -join ','
                 'NICs connected' = "{0}/{1}" -f ($thisVMsNics.Where( { $_.ConnectionState.Connected } ) | Measure-Object | Select-Object -ExpandProperty Count) , $thisVMsNics.Count
                 'Memory (GB)' = $vm.MemoryGB
                 'Guest OS' = $(If( $vm.Guest -and $vm.Guest.OSFullName ) { $vm.Guest.OSFullName } Else { $vm.GuestId })
@@ -3501,7 +3554,7 @@ $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
 $datatable = New-Object -TypeName System.Data.DataTable
 
 $displayedFields = New-Object -TypeName System.Collections.Generic.List[String] 
-$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "Network(s)" , "NICs Connected" , "IP Addresses" , "VMware Tools" , "Tools Status" , "HW Version" , "Guest OS" , "Crashed" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
+$displayedFields += @( "Name" , "Power State" , "Host" , "Notes" , "Created" , "Started" , "vCPUs" , "Memory (GB)" , "Snapshots" , "Network(s)" , "NICs" , "NICs Connected" , "IP Addresses" , "VMware Tools" , "Tools Status" , "HW Version" , "Guest OS" , "Crashed" , "Datastore(s)" , "Folder" , "Used Space (GB)" )
 If( $lastSeconds -gt 0 )
 {
     $displayedFields += @( 'Mem Usage Average','Cpu Usagemhz Average','Net Usage Average','Cpu Usage Average','Disk Usage Average' )
@@ -3761,8 +3814,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU2w5QqsDnTTzMSFk3HCnx60x4
-# RZCgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU4SwwRPkCzBm/YeJpYH9Eg5ou
+# 44igggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3823,11 +3876,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFDEAVsvM5GZAGWBrpIaO
-# yXYQo90oMA0GCSqGSIb3DQEBAQUABIIBAEWTnudrnGSLMlbX5vQTeedMhQmwPgAs
-# JUKjnLaXNAvVgD6cOBVXUut7y0eUcecV0zxOeNK/D52CGZG1z10T8SAB8JqEyZ+R
-# qfSMRgWMgePY7s0G6v/+XAeAJOqjGrmVbw1Rc/pv14/CD59arAEyumUKeDDjYTQm
-# AGLzze/Rkdipg/QwugRDOgc/Wtkaw3olwrjB0EvR/GG57yqVxY5ZOL8OlyETJsBW
-# vHyt1QHNZ06zab8eoFvxZINuwq2QAwUVOcmGE1dxXuhveT2zKgP+fWP4jQ5zeRtF
-# JJC2QkhKQ8l614v077plnXg+5vb5wLAybAVM+ddCgwhzSEJQyVt39mo=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFG68Xi+xDi4PI99Nb5rT
+# W/2l2UvLMA0GCSqGSIb3DQEBAQUABIIBAAwTzw1OZicTQ3QrNvnGRZV9e9X2oZxq
+# Xl8R8FIfb4YIXzzF19BeJyaBL0LeC2IZ78JzJIs+NkZrZ3o5zqXxq1JAttZhOAME
+# 4bbfa0Tqdf/gUEfs1+lE9aVX3UQ7rCLOfFk9pDpcc57c6u9RdDLwV07G8Ds7Nvzi
+# o7w08hKfUZWUsSPxAA6G5wB0w6R6hJz8WWDhQPYEe2Z35oHYmYjuJQSQNIm0cpgP
+# 5oxr+HBmQd40yYanfI1cjU5JNYIwDlrQCVfgREGRYF3H7hLsai0ccQpMEnjkIVwY
+# eyZfTgids+37aBCjO61bZRRYHFCUbZlpDhsAcyPzxVxxc9LHX0twrEs=
 # SIG # End signature block
