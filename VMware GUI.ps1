@@ -63,6 +63,7 @@
     @guyrleech 16/06/2021  Added "Tools Status" column
                            Added delete all option for deleting & power operations on VMs
     @guyrleech 21/06/2021  Added "NICs" column
+    @guyrleech 22/06/2021  Added Datastore picker to New VM dialogue
 #>
 
 <#
@@ -351,25 +352,27 @@ $pinvokeCode = @'
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:VMWare_GUI"
         mc:Ignorable="d"
-        Title="New VM from Template" Height="536.922" Width="800">
-    <Grid>
+        Title="New VM from Template" Height="606.922" Width="800">
+    <Grid Margin="0,0,0,-72">
         <TextBox x:Name="textboxNewVMName" HorizontalAlignment="Left" Height="34" Margin="197,33,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300"/>
         <TextBox x:Name="textboxNewVMDescription" HorizontalAlignment="Left" Height="34" Margin="197,91,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300" SpellCheck.IsEnabled="True"/>
         <ComboBox x:Name="comboboxTemplate" HorizontalAlignment="Left" Height="34" Margin="197,160,0,0" VerticalAlignment="Top" Width="300"/>
         <ComboBox x:Name="comboboxCustomisation" HorizontalAlignment="Left" Height="34" Margin="197,229,0,0" VerticalAlignment="Top" Width="300"/>
         <ComboBox x:Name="comboboxResourcePool" HorizontalAlignment="Left" Height="34" Margin="197,285,0,0" VerticalAlignment="Top" Width="300"/>
         <ComboBox x:Name="comboboxLocation" HorizontalAlignment="Left" Height="34 " Margin="197,348,0,0" VerticalAlignment="Top" Width="300"/>
-        <CheckBox x:Name="checkboxStartNewVM" Content="_Start" HorizontalAlignment="Left" Height="16" Margin="197,405,0,0" VerticalAlignment="Top" Width="117" IsChecked="True"/>
-        <CheckBox x:Name="checkboxNewVMAsync" Content="Create As_ync" HorizontalAlignment="Left" Height="16" Margin="288,405,0,0" VerticalAlignment="Top" Width="117" IsChecked="True"/>
+        <CheckBox x:Name="checkboxStartNewVM" Content="_Start" HorizontalAlignment="Left" Height="16" Margin="164,468,0,0" VerticalAlignment="Top" Width="117" IsChecked="True"/>
+        <CheckBox x:Name="checkboxNewVMAsync" Content="Create As_ync" HorizontalAlignment="Left" Height="16" Margin="278,468,0,0" VerticalAlignment="Top" Width="117" IsChecked="True"/>
         <Label Content="Name" HorizontalAlignment="Left" Height="36" Margin="26,42,0,0" VerticalAlignment="Top" Width="127"/>
-        <Button x:Name="btnNewVMOK" Content="OK" HorizontalAlignment="Left" Height="34" Margin="18,448,0,0" VerticalAlignment="Top" Width="176" IsDefault="True"/>
-        <Button x:Name="btnNewVMCancel" Content="Cancel" HorizontalAlignment="Left" Height="38" Margin="225,448,0,0" VerticalAlignment="Top" Width="176" IsCancel="True"/>
+        <Button x:Name="btnNewVMOK" Content="OK" HorizontalAlignment="Left" Height="34" Margin="26,511,0,0" VerticalAlignment="Top" Width="176" IsDefault="True"/>
+        <Button x:Name="btnNewVMCancel" Content="Cancel" HorizontalAlignment="Left" Height="38" Margin="219,507,0,0" VerticalAlignment="Top" Width="176" IsCancel="True"/>
         <Label Content="Template" HorizontalAlignment="Left" Height="34" Margin="26,161,0,0" VerticalAlignment="Top" Width="128"/>
         <Label Content="Customisation" HorizontalAlignment="Left" Height="34" Margin="26,232,0,0" VerticalAlignment="Top" Width="124"/>
         <Label Content="Resource pool" HorizontalAlignment="Left" Height="34" Margin="26,285,0,0" VerticalAlignment="Top" Width="124" RenderTransformOrigin="0.532,1.96"/>
         <Label Content="Location" HorizontalAlignment="Left" Height="34" Margin="26,348,0,0" VerticalAlignment="Top" Width="124"/>
         <Label Content="Description" HorizontalAlignment="Left" Height="34" Margin="26,100,0,0" VerticalAlignment="Top" Width="127"/>
-        </Grid>
+        <ComboBox x:Name="comboboxDatastore" HorizontalAlignment="Left" Height="34 " Margin="197,412,0,0" VerticalAlignment="Top" Width="300" RenderTransformOrigin="0.48,2.029"/>
+        <Label Content="Datastore" HorizontalAlignment="Left" Height="34" Margin="26,412,0,0" VerticalAlignment="Top" Width="124"/>
+    </Grid>
 </Window>
 '@
 
@@ -1887,6 +1890,11 @@ Function New-VirtualMachine
             $WPFcomboboxResourcePool.Items.Add( $_.Name )
         }
 
+        Get-Datastore | Sort-Object -Property Name | ForEach-Object `
+        {
+            $WPFcomboboxDatastore.Items.Add( $_.Name )
+        }
+
         [hashtable]$folderIdToName = @{}
         [hashtable]$fullpathToFolderId = @{}
 
@@ -1928,7 +1936,13 @@ Function New-VirtualMachine
                     $parent = $null
                 }
             }
-            $fullpathToFolderId.Add( $fullPathName , $folder ) ## so we can map the chosen folder name back to an id
+            try
+            {
+                $fullpathToFolderId.Add( $fullPathName , $folder ) ## so we can map the chosen folder name back to an id
+            }
+            catch
+            {
+            }
             $fullPathName
         } | Sort-Object | ForEach-Object { $WPFcomboboxLocation.Items.Add( $_ ) }
 
@@ -1981,6 +1995,17 @@ Function New-VirtualMachine
                     Write-Warning -Message "Failed to find id for folder $($WPFcomboboxLocation.SelectedItem)"
                 }
             }
+            if( $WPFcomboboxDatastore.SelectedItem )
+            {
+                if( $datastore = Get-Datastore -Name $WPFcomboboxDatastore.SelectedItem )
+                {
+                    $newVMparameters.Add( 'Datastore' , $datastore )
+                }
+                else
+                {
+                    Write-Warning -Message "Failed to find datastore $($WPFcomboboxDatastore.SelectedItem)"
+                }
+            }
             if( ! [string]::IsNullOrEmpty( $WPFtextboxNewVMDescription.Text.Trim() ) )
             {
                 $newVMparameters.Add( 'Description' , $WPFtextboxNewVMDescription.Text.Trim() )
@@ -2017,7 +2042,11 @@ Function New-VirtualMachine
             elseif( $newVMparameters.RunAsync )
             {
                 ## Add object which has start details so can start when finished if requested
-                $script:AsyncTasks.Add( ([pscustomobject]@{ 'TaskId' = $newVM.Id ; 'VM Name' = $newVMparameters.Name ; 'Start' = $WPFcheckboxStartNewVM.IsChecked } ))
+                $script:AsyncTasks.Add( ([pscustomobject]@{
+                    'TaskId' = $newVM.Id
+                    'VM Name' = $newVMparameters.Name
+                    'Start' = $WPFcheckboxStartNewVM.IsChecked
+                    'StartTime' = [datetime]::Now } ))
             }
             else
             {
@@ -2542,7 +2571,7 @@ Function Process-Action
                                 else
                                 {
                                     ## Add object which has start details so can start when finished if requested
-                                    $script:AsyncTasks.Add( ([pscustomobject]@{ 'TaskId' = $backupTask ; 'VM Name' = $vm.Name ; 'Backup VM' = $cloneName } ))
+                                    $script:AsyncTasks.Add( ([pscustomobject]@{ 'TaskId' = $backupTask ; 'VM Name' = $vm.Name ; 'Backup VM' = $cloneName ; 'StartTime' = [datetime]::Now} ))
                                 }
                             }
                             else
@@ -3701,7 +3730,7 @@ public class SSLHandler
                 {
                     if( $task.State -eq 'Error' )
                     {
-                        [void][Windows.MessageBox]::Show( "$($task.Description) of `"$($script:AsyncTasks[ $index ].'VM Name')`" gave `"$($task.extensiondata.info.Error.LocalizedMessage)`"" , 'Task Failed' , 'Ok' ,'Error' )
+                        [void][Windows.MessageBox]::Show( "$(Get-Date -Format G)`n$($task.Description) of `"$($script:AsyncTasks[ $index ].'VM Name')`" gave `"$($task.extensiondata.info.Error.LocalizedMessage)`"" , 'Task Failed' , 'Ok' ,'Error' )
 
                         if( $task.Name -eq 'CloneVM_Task' -and ( $answer = [Windows.MessageBox]::Show( "Delete `"$($script:AsyncTasks[ $index ].'VM Name')`" ?" , 'Task Failure Tidyup' , 'YesNo' ,'Question' ) ) -eq 'Yes' )
                         {
@@ -3722,7 +3751,12 @@ public class SSLHandler
                                 $additional = ' & failed to start'
                             }
                         }
-                        [void][Windows.MessageBox]::Show( "$($task.Description) of `"$($script:AsyncTasks[ $index ].'VM Name')`"$additional" , 'Task Completed Ok' , 'Ok' ,'Information' )
+                        [int]$duration = New-TimeSpan -Start $script:AsyncTasks[ $index ].StartTime | Select -ExpandProperty TotalSeconds
+                        [void][Windows.MessageBox]::Show(
+                            "$(Get-Date -Format G)`n$($task.Description) of `"$($script:AsyncTasks[ $index ].'VM Name')`", duration $($duration)s$additional" , 
+                            'Task Completed Ok' , 
+                            'Ok' ,
+                            'Information' )
                     }
                     $script:AsyncTasks.RemoveAt( $index )
                 }
@@ -3814,8 +3848,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU4SwwRPkCzBm/YeJpYH9Eg5ou
-# 44igggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUPN7imF2Tx/x/t0BQqHRhW0/L
+# bjagggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3876,11 +3910,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFG68Xi+xDi4PI99Nb5rT
-# W/2l2UvLMA0GCSqGSIb3DQEBAQUABIIBAAwTzw1OZicTQ3QrNvnGRZV9e9X2oZxq
-# Xl8R8FIfb4YIXzzF19BeJyaBL0LeC2IZ78JzJIs+NkZrZ3o5zqXxq1JAttZhOAME
-# 4bbfa0Tqdf/gUEfs1+lE9aVX3UQ7rCLOfFk9pDpcc57c6u9RdDLwV07G8Ds7Nvzi
-# o7w08hKfUZWUsSPxAA6G5wB0w6R6hJz8WWDhQPYEe2Z35oHYmYjuJQSQNIm0cpgP
-# 5oxr+HBmQd40yYanfI1cjU5JNYIwDlrQCVfgREGRYF3H7hLsai0ccQpMEnjkIVwY
-# eyZfTgids+37aBCjO61bZRRYHFCUbZlpDhsAcyPzxVxxc9LHX0twrEs=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFBBrMhP/k1qhn4ecR0/B
+# LhhdIKkbMA0GCSqGSIb3DQEBAQUABIIBABZaaeOvk751lB9a89XVc5yuLo5cL3fz
+# 6WVwotlchewnmUw60ursQHFjRSg3VWhijJ1mc1Ow0LDJ53PC46BB8zhbCoxds+U4
+# g4LwyEfRQwjubsDdu+dMtJLSc42MIZRRvOiSJtbrdjI5U9OTcVYn9fJn07MrZUMo
+# bKvuYzcd6wiqhE9zGXGvD37VbNvCnHCGTiL7zM5mQ2InnOqoc1KkryTlGS+Mkpsc
+# S5MeirpTCJFjC+KPoO7WyG8GE0wy4OqIWYqKTNMb7/uRdk4fb57K3XTbYv0zfq+L
+# kNARt5Z+RHoMJH/f/jmfEEvsL5pdFLqId9T50E80nbFW14oVD2QUgvQ=
 # SIG # End signature block
