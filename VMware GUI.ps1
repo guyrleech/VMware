@@ -63,7 +63,7 @@
     @guyrleech 16/06/2021  Added "Tools Status" column
                            Added delete all option for deleting & power operations on VMs
     @guyrleech 21/06/2021  Added "NICs" column
-    @guyrleech 22/06/2021  Added Datastore picker to New VM dialogue
+    @guyrleech 22/06/2021  Added Datastore picker to New VM dialogue. Added move functionality
 #>
 
 <#
@@ -214,7 +214,7 @@ Param
 (
     [string[]]$server ,
     [string]$username ,
-    [System.Management.Automation.PSCredential]$credential ,
+    [System.Management.Automation.PSCredential]$credential , 
     [string]$vmName = '*' ,
     [int]$rdpPort = 3389 ,
     [string]$mstscParams ,
@@ -329,6 +329,7 @@ $pinvokeCode = @'
                     <MenuItem Header="Run" x:Name="RunScriptContextMenu" />
                     <MenuItem Header="Delete" x:Name="DeleteContextMenu" />
                     <MenuItem Header="Screenshot" x:Name="ScreenshotContextMenu" />
+                    <MenuItem Header="Move" x:Name="MoveContextMenu" />
                     <MenuItem Header="Power" x:Name="PowerContextMenu">
                         <MenuItem Header="Power On" x:Name="PowerOnContextMenu" />
                         <MenuItem Header="Power Off" x:Name="PowerOffContextMenu" />
@@ -1868,27 +1869,43 @@ Function New-VirtualMachine
 {
     Param
     (
-        $GUIobject
+        $GUIobject ,
+        [ValidateSet('New','Move','Clone')]
+        [string]$operation = 'New' ,
+        $vm
     )
     
     if( $newVMForm = New-Form -inputXaml $newVMXAML )
     {
-        Get-Template | Sort-Object -Property Name | ForEach-Object `
+        if( $operation -eq 'new' )
         {
-            $WPFcomboboxTemplate.Items.Add( $_.Name )
+            Get-Template | Sort-Object -Property Name | ForEach-Object `
+            {
+                $WPFcomboboxTemplate.Items.Add( $_.Name )
+            }
+
+            $WPFcomboboxCustomisation.Items.Add( '<None>' )
+
+            Get-OSCustomizationSpec | Sort-Object -Property Name | ForEach-Object `
+            {
+                $WPFcomboboxCustomisation.Items.Add( $_.Name )
+            }
+
+            Get-ResourcePool | Sort-Object -Property Name | ForEach-Object `
+            {
+                $WPFcomboboxResourcePool.Items.Add( $_.Name )
+            } 
+        }
+        else
+        {
+            $WPFcomboboxTemplate.IsEnabled = $false
+            $WPFcomboboxCustomisation.IsEnabled = $false
+            $WPFtextboxNewVMName.IsEnabled = $false
+            $WPFtextboxNewVMDescription.IsEnabled = $false
+            $WPFcomboboxResourcePool.IsEnabled = $false
+            $newVMForm.Title = "$operation $($vm.Name)"
         }
 
-        $WPFcomboboxCustomisation.Items.Add( '<None>' )
-
-        Get-OSCustomizationSpec | Sort-Object -Property Name | ForEach-Object `
-        {
-            $WPFcomboboxCustomisation.Items.Add( $_.Name )
-        }
-        
-        Get-ResourcePool | Sort-Object -Property Name | ForEach-Object `
-        {
-            $WPFcomboboxResourcePool.Items.Add( $_.Name )
-        }
 
         Get-Datastore | Sort-Object -Property Name | ForEach-Object `
         {
@@ -1948,24 +1965,59 @@ Function New-VirtualMachine
 
         $WPFbtnNewVMOK.Add_Click({
             $_.Handled = $true
-            if( [string]::IsNullOrEmpty( $WPFtextboxNewVMName.Text.Trim() ) )
+            [bool]$proceed = $false 
+
+            if( $operation -eq 'new' -and [string]::IsNullOrEmpty( $WPFtextboxNewVMName.Text.Trim() ) )
             {
                 [void][Windows.MessageBox]::Show( "Must enter a name for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
             }
-            elseif( Get-VM -Name $WPFtextboxNewVMName.Text.Trim() -ErrorAction SilentlyContinue )
+            elseif( $operation -eq 'new' -and ( Get-VM -Name $WPFtextboxNewVMName.Text.Trim() -ErrorAction SilentlyContinue ) )
             {
                 [void][Windows.MessageBox]::Show( "VM `"$($WPFtextboxNewVMName.Text)`" already exists" , 'New VM Error' , 'Ok' ,'Error' )
             }
-            elseif( ! $WPFcomboboxTemplate.SelectedItem )
+            elseif( $operation -eq 'new' -and ! $WPFcomboboxTemplate.SelectedItem )
             {
                 [void][Windows.MessageBox]::Show( "Must select the template for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
             }
-            elseif( ! $WPFcomboboxResourcePool.SelectedItem )
+            elseif( $operation -eq 'new' -and ! $WPFcomboboxResourcePool.SelectedItem )
             {
                 [void][Windows.MessageBox]::Show( "Must select the resource pool for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
             }
-            ## else others can be null
-            else
+            elseif( $operation -eq 'move' -and ! $WPFcomboboxDatastore.SelectedItem )
+            {
+                [void][Windows.MessageBox]::Show( "Must select the datstore pool for the VM to be moved to" , 'Move VM Error' , 'Ok' ,'Error' )
+            }
+            elseif( $operation -eq 'move' )
+            {
+                ## check hard drive(s) to see if already on the destination datastore
+                #$destinationDatastore = Get-Datastore -Name $WPFcomboboxDatastore.SelectedItem
+                [int]$numberHardDrives = 0
+                [int]$numberHardDrivesAlreadyInDestination = 0
+
+                Get-HardDisk -VM $vm | ForEach-Object `
+                {
+                    $numberHardDrives++
+                    if( $_.Filename -match '^\[([^\]]*)\]\s' -and $Matches[1] -eq $WPFcomboboxDatastore.SelectedItem )
+                    {
+                        $numberHardDrivesAlreadyInDestination++
+                    }
+                }
+
+                if( $numberHardDrives -gt 0 -and $numberHardDrives -eq $numberHardDrivesAlreadyInDestination )
+                {
+                    [void][Windows.MessageBox]::Show( "All $numberHardDrives source hard drives alredy in destination datastore" , 'Move VM Error' , 'Ok' ,'Error' )
+                }
+                else
+                {
+                    $proceed = $true
+                }
+            }
+            else ## else others can be null
+            {
+                $proceed = $true
+            }        
+            
+            if( $proceed )
             {
                 $newVMForm.DialogResult = $true 
                 $newVMForm.Close()
@@ -1979,16 +2031,25 @@ Function New-VirtualMachine
                     -ResourcePool (Get-ResourcePool|select -first 1) -Location (Get-Folder -Name "Citrix") | Start-VM
             #>
             [hashtable]$newVMparameters = @{ 
-                Name = $WPFtextboxNewVMName.Text.Trim()
-                Template = (Get-Template -Name $WPFcomboboxTemplate.SelectedItem)
-                ResourcePool = (Get-ResourcePool -Name $WPFcomboboxResourcePool.SelectedItem)
                 RunAsync = $WPFcheckboxNewVMAsync.IsChecked }
+            
+            if( $operation -eq 'new' )
+            {
+                $newVMparameters.Add( 'ResourcePool' , (Get-ResourcePool -Name $WPFcomboboxResourcePool.SelectedItem))
+                $newVMparameters.Add( 'Name' , $WPFtextboxNewVMName.Text.Trim() )
+                $newVMparameters.Add( 'Template' , (Get-Template -Name $WPFcomboboxTemplate.SelectedItem) )
+            }
+            else
+            {
+                $newVMparameters.Add( 'VM' , $vm )
+                ##$newVMparameters.Add( 'Destination' , (Get-ResourcePool -Name $WPFcomboboxResourcePool.SelectedItem))
+            }
 
             if( $WPFcomboboxLocation.SelectedItem )
             {
                 if( $folder = $fullpathToFolderId[ $WPFcomboboxLocation.SelectedItem ] )
                 {
-                    $newVMparameters.Add( 'Location' , $folder )
+                    $newVMparameters.Add( $(if( $operation -eq 'new' ) { 'Location' } else { 'InventoryLocation' }) , $folder ) ## -folder deprecated in move-vm
                 }
                 else
                 {
@@ -2022,7 +2083,14 @@ Function New-VirtualMachine
                             })
             Try
             {
-                $newVM = New-VM @newVMparameters
+                if( $operation -eq 'new' )
+                {
+                    $newVM = New-VM @newVMparameters
+                }
+                elseif( $operation -eq 'move' )
+                {
+                    $newVM = Move-VM @newVMparameters
+                }
             }
             Catch
             {
@@ -2035,9 +2103,14 @@ Function New-VirtualMachine
                 $GUIobject.Cursor = $oldCursor ## will set default if not set
             }
 
+            if( $operation -ne 'new' )
+            {
+                $newVMparameters.Add( 'Name' , $vm.Name )
+            }
+
             if( ! $newVM )
             {
-                [void][Windows.MessageBox]::Show( "Failed to create new VM `"$($newVMparameters[ 'Name' ])`"" , 'New VM Error' , 'Ok' ,'Error' )
+                [void][Windows.MessageBox]::Show( "Failed to create new VM `"$($newVMparameters[ 'Name' ])`"" , "$operation VM Error" , 'Ok' ,'Error' )
             }
             elseif( $newVMparameters.RunAsync )
             {
@@ -2047,6 +2120,7 @@ Function New-VirtualMachine
                     'VM Name' = $newVMparameters.Name
                     'Start' = $WPFcheckboxStartNewVM.IsChecked
                     'StartTime' = [datetime]::Now } ))
+                Write-Verbose -Message "$(Get-Date -Format G): task $($newVM.Id) for $($newVMparameters.Name) added - list now has $($script:AsyncTasks.Count) items"
             }
             else
             {
@@ -2899,7 +2973,7 @@ Function Process-Action
                     }
                     else
                     {
-                        "Are you sure you want to delete $($vm.Name)?"
+                        "Are you sure you want to $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($vm.Name)?"
                     })
                     $answer = [Windows.MessageBox]::Show( $prompt , 'Confirm Power Operation' , $buttons ,'Question' )
                 }
@@ -3122,7 +3196,7 @@ Function Process-Action
             }            
             elseif( $Operation -eq 'Delete' )
             {
-                ## if not prompted before or previouus answer was "no" (so only deleting one at a time), prompt user
+                ## if not prompted before or previous answer was "no" (so only deleting one at a time), prompt user
                 if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
                 {
                     [string]$buttons = 'YesNo'
@@ -3145,6 +3219,33 @@ Function Process-Action
                 elseif( $answer -eq 'Yes' -or ( $selectedVMs.Count -gt 1 -and $answer -eq 'No' ))
                 {
                     VMware.VimAutomation.Core\Remove-VM -DeletePermanently -VM $vm -Confirm:$false
+                }
+            }
+            elseif( $Operation -eq 'Move' )
+            {
+                ## if not prompted before or previous answer was "no" (so only moving one at a time), prompt user
+                if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
+                {
+                    [string]$buttons = 'YesNo'
+                    [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
+                    {
+                        "Are you sure you want to move $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($VM.Name) Only or Cancel for None"
+                        $buttons = 'YesNoCancel'
+                    }
+                    else
+                    {
+                        "Are you sure you want to move $($vm.Name)?"
+                    })
+                    $answer = [Windows.MessageBox]::Show( $prompt , 'Confirm Move Operation' , $buttons ,'Question' )
+                }
+                if( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'Cancel' )
+                {
+                    $answer = $null
+                    return
+                }
+                elseif( $answer -eq 'Yes' -or ( $selectedVMs.Count -gt 1 -and $answer -eq 'No' ))
+                {
+                    New-VirtualMachine -GUIobject $mainForm -operation 'Move' -vm $vm
                 }
             }
             elseif( $Operation -eq 'Events' )
@@ -3636,6 +3737,7 @@ $WPFDeleteContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines
 $WPFScreenshotContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Screenshot'} )
 $WPFBackupContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Backup'} )
 $WPFEventsContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Events'} )
+$WPFMoveContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'Move'} )
 $WPFCDConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'ConnectCD'} )
 $WPFCDDisconnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'DisconnectCD'} )
 $WPFNICConnectContextMenu.Add_Click( { Process-Action -GUIobject $WPFVirtualMachines -Operation 'ConnectNIC'} )
@@ -3656,7 +3758,7 @@ $WPFbtnHosts.Add_Click({
 })
 $WPFbtnNew.Add_Click({
     $_.Handled = $true
-    New-VirtualMachine -GUIobject $mainForm
+    New-VirtualMachine -GUIobject $mainForm -operation New
 })
 $WPFbtnFilter.Add_Click({
     if( Set-Filters -name $vmName )
@@ -3848,8 +3950,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUPN7imF2Tx/x/t0BQqHRhW0/L
-# bjagggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUz8vpz01H8EM4CEU0pV9pLKeT
+# +bugggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -3910,11 +4012,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFBBrMhP/k1qhn4ecR0/B
-# LhhdIKkbMA0GCSqGSIb3DQEBAQUABIIBABZaaeOvk751lB9a89XVc5yuLo5cL3fz
-# 6WVwotlchewnmUw60ursQHFjRSg3VWhijJ1mc1Ow0LDJ53PC46BB8zhbCoxds+U4
-# g4LwyEfRQwjubsDdu+dMtJLSc42MIZRRvOiSJtbrdjI5U9OTcVYn9fJn07MrZUMo
-# bKvuYzcd6wiqhE9zGXGvD37VbNvCnHCGTiL7zM5mQ2InnOqoc1KkryTlGS+Mkpsc
-# S5MeirpTCJFjC+KPoO7WyG8GE0wy4OqIWYqKTNMb7/uRdk4fb57K3XTbYv0zfq+L
-# kNARt5Z+RHoMJH/f/jmfEEvsL5pdFLqId9T50E80nbFW14oVD2QUgvQ=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFHQ3V9wwZ65EwX8DNQi3
+# +uwmM8U/MA0GCSqGSIb3DQEBAQUABIIBAEegzQwyVwJzxuJjsRO7CVqKwLJyo63p
+# 6bNbZGZXwjBdQ2+ZxmI4lKknX0UfLtxk1O/sl2hyMJACTm0Nqeks95LfUDTPXxxU
+# 1hCAS8cZ5EL3CsUO+ErDryv2MsA+HtipdS4R4sf4MWGSfkW8rBWScMoE+lhnUeRl
+# HQpclMuhQy+Imwm/S2Ud+ZclAm293lcSWoVlvh1ICzbiamxDB4VeKBqy0zs1fP6L
+# eXX0WJrA9Lgyt8uV+rTsVgQOrdfNhJXgheeTNFiWNHJFoZU/dOa5trjxFFi4lWcR
+# yP8IDHB8kY1WrNOuwVUG7f+lvFPok8YyxD1bBNFijHo0vQ5+51KnRxQ=
 # SIG # End signature block
