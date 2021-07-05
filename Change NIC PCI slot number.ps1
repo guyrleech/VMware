@@ -60,12 +60,24 @@ Change the PCI port number in VMs matching GLXA19PVS40* to the PCI port number i
 
 Change the PCI port number in VMs matching GLXA19PVS40* to 256 using the VMware vCenter server grl-vcenter04.guyrleech.local
 
+.EXAMPLE
+
+& '.\Change NIC PCI slot number.ps1' -slotNumber 256 -vms GLXA19PVS40* -vcenter grl-vcenter04.guyrleech.local -network "Internal Network"
+
+Change the PCI port number on the NIC connected to the "Internal Network" network in VMs matching GLXA19PVS40* to 256 using the VMware vCenter server grl-vcenter04.guyrleech.local
+Use this when the VMs have multiple NICs
+
 .NOTES
 
 VMs must be powered off.
 
 Requires VMware PowerCLI.
 
+Modification History:
+
+    04/07/2021 @guyrleech   Initial public release
+    05/07/2021 @guyrleech   Deal with VMs to change having multiple NICs or no slot number (never booted).
+                            Added -poweron option
 #>
 
 <#
@@ -85,21 +97,24 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMA
 Param
 (
     [string]$vcenter ,
-    [Parameter(Mandatory=$true,HelpMessage='PCI Slot Number to set for ethernet controller',ParameterSetName='PCIslot')]
     [int]$slotNumber ,
-    [Parameter(Mandatory=$true,HelpMessage='Source VM to get PCI slot number from',ParameterSetName='FromVM')]
     [string]$fromVM ,
-    [Parameter(Mandatory=$false,HelpMessage='NIC type to get PCI slot number from',ParameterSetName='FromVM')]
+    [ValidateSet('e1000','e1000e','vmxnet2','vmxnet3','flexible','enhancedvmxnet','SriovEthernetCard','vmxnet3','Vmxnet3Vrdma')]
     [string]$nicType ,
-    [Parameter(Mandatory=$false,HelpMessage='Network name to get PCI slot number from',ParameterSetName='FromVM')]
     [string]$network ,
     [string]$vms ,
+    [switch]$powerOn ,
     [int]$port ,
     [ValidateSet('http','https')]
     [string]$protocol ,
     [switch]$allLinked ,
     [switch]$force
 )
+
+if( $PSBoundParameters.ContainsKey( 'slotNumber' ) -and $PSBoundParameters[ 'fromVM' ] )
+{
+    Throw "Only one of -slotNumber and -fromVM is allowed"
+}
 
 Import-Module -Name VMware.VimAutomation.Core -Verbose:$false
 
@@ -156,11 +171,38 @@ if( ! $PSBoundParameters[ 'slotNumber' ] )
             }
         }
 
+        if( ! $PSBoundParameters[ 'nicType' ] )
+        {
+            ## find the NIC for which we have the slot number so we can get its type as destination VMs probably have multiple NICs too
+            if( $thisNic = $nic.Where( { $_.ExtensionData.SlotInfo.PciSlotNumber -eq $slots[0].Group.PciSlotNumber -and ( [string]::IsNullOrEmpty( $nicType ) -or $_.Type -eq $nicType ) -and ( [string]::IsNullOrEmpty( $network ) -or $_.NetworkName -eq $network ) } )  )
+            {
+                $nicType = $thisNic.Type
+                Write-Verbose -Message "$($nic.Count) NICs found so setting type to $nicType"
+            }
+            else
+            {
+                Write-Warning -Message "Failed to find filtered NIC in $($sourceVM.Name) for slot $($slots[0].Name)"
+            }
+            if( $thisNIC -and ! $PSBoundParameters[ 'network' ] )
+            {
+                $network = $thisNIC.NetworkName
+                Write-Verbose -Message "$($nic.Count) NICs found so setting network name to `"$network`""
+            }
+        }
+
         $slotNumber = $slots[0].Name
     }
     else
     {
         $slotNumber = $nic.ExtensionData.SlotInfo.PciSlotNumber
+        if( ! $PSBoundParameters[ 'nicType' ] )
+        {
+            $nicType = $nic.type
+        }
+        if( ! $PSBoundParameters[ 'network' ] )
+        {
+            $network = $nic.NetworkName
+        }
     }
 
     Write-Verbose -Message "Slot number is $slotNumber in $($sourceVM.Name)"
@@ -175,37 +217,64 @@ if( ! $vmsToChange -or ! $vmsToChange.Count )
 
 ForEach( $vmToChange in $vmsToChange )
 {
-    if( $nic = Get-NetworkAdapter -VM $vmToChange | Where-Object NetworkName -match $network )
+    if( $nic = Get-NetworkAdapter -VM $vmToChange | Where-Object { ( [string]::IsNullOrEmpty( $network ) -or $_.NetworkName -eq $network ) -and ( [string]::IsNullOrEmpty( $nicType ) -or $_.Type -eq $nicType ) } )
     {
-        [int]$existingSlotNumber = $nic.ExtensionData.SlotInfo.PciSlotNumber
-
-        if( $existingSlotNumber -ne $slotNumber )
+        if( $nic -is [array] )
         {
-            if( $vmToChange.PowerState -ne 'PoweredOff' )
-            {
-                Write-Warning -Message "Cannot change $($vmToChange.Name) from $existingSlotNumber to $slotNumber because VM is not powered off, it is $($vmToChange.PowerState)"
-            }
-            elseif( $PSCmdlet.ShouldProcess( $vmToChange.Name , "Change $($nic.Name) ($($nic.Type)) PCI slot number from $existingSlotNumber to $slotNumber" ))
-            {
-                $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
-                $device = New-Object VMware.Vim.VirtualDeviceConfigSpec
-
-                $device.Operation = [VMware.Vim.VirtualDeviceConfigSpecOperation]::edit
-                $device.Device = $nic.ExtensionData
-                $device.Device.SlotInfo.PciSlotNumber = $slotNumber
-
-                $spec.deviceChange = @( $device )
-
-                $vmToChange.ExtensionData.ReconfigVM($spec)
-                if( ! $? )
-                {
-                    Write-Error "Problem changing slot from $existingSlotNumber to $slotNumber in $($vmToChange.Name)"
-                }
-            }
+            Write-Warning -Message "Unable to change nic for $($vmToChange.Name) as there are $($nic.Count) - use -nictype and/or -network to be more specific"
         }
         else
         {
-            Write-Warning "NIC in $($vmToChange.Name) is already in slot $slotNumber"
+            [int]$existingSlotNumber = -1
+            
+            try
+            {
+                $existingSlotNumber  = $nic.ExtensionData.SlotInfo.PciSlotNumber
+            }
+            catch
+            {
+                Write-Warning -Message "Unable to get existing slot number for nic in $($vmToChange.Name)"
+            }
+
+            if( $existingSlotNumber -ne $slotNumber )
+            {
+                if( $vmToChange.PowerState -ne 'PoweredOff' )
+                {
+                    Write-Warning -Message "Cannot change $($vmToChange.Name) from $existingSlotNumber to $slotNumber because VM is not powered off, it is $($vmToChange.PowerState)"
+                }
+                elseif( $PSCmdlet.ShouldProcess( $vmToChange.Name , "Change $($nic.Name) ($($nic.Type)) on `"$($nic.NetworkName)`" PCI slot number from $existingSlotNumber to $slotNumber" ))
+                {
+                    $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+                    $device = New-Object VMware.Vim.VirtualDeviceConfigSpec
+
+                    $device.Operation = [VMware.Vim.VirtualDeviceConfigSpecOperation]::edit
+                    $device.Device = $nic.ExtensionData
+                    ## if never booted then may not have slot number
+                    if( $null -eq $device.Device.SlotInfo )
+                    {
+                        $device.Device.SlotInfo = New-Object -TypeName VMware.Vim.VirtualDevicePciBusSlotInfo
+                        Write-Warning -Message "$($vmToChange.Name) did not have slot info so added"
+                    }
+
+                    $device.Device.SlotInfo.PciSlotNumber = $slotNumber
+
+                    $spec.deviceChange = @( $device )
+
+                    $vmToChange.ExtensionData.ReconfigVM($spec)
+                    if( ! $? )
+                    {
+                        Write-Error "Problem changing slot from $existingSlotNumber to $slotNumber in $($vmToChange.Name)"
+                    }
+                    elseif( $powerOn )
+                    {
+                        Start-VM -VM $vmToChange
+                    }
+                }
+            }
+            else
+            {
+                Write-Warning "NIC in $($vmToChange.Name) is already in slot $slotNumber"
+            }
         }
     }
     else
@@ -218,11 +287,12 @@ ForEach( $vmToChange in $vmsToChange )
         Write-Warning -Message $message
     }
 }
+
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUWJfrvWdsQ0Z+kMGMtwPVyoSx
-# b5ygggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU8f9s/eZEep70mcyeHSF2RQEw
+# GhqgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -283,11 +353,11 @@ ForEach( $vmToChange in $vmsToChange )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFJkRiKNUgRWyAk+L3ZkQ
-# IB8FusDuMA0GCSqGSIb3DQEBAQUABIIBAEq/8uRQCDiTb+zeuXSJtipS3B2vj8kn
-# Cv44dtRPkSz9tzCgbieoU7xgwy9Uz44AUSKAuDA4F3QHdE5co9j1g6CttVSHihVm
-# U3XhmaTiTFKKRl0hV6K/M3iOEKVXn3lt1Kc++cz3k6E/1xm096NsVclpjsmxNKz5
-# Wz0PYPz9vx/vO7OaEbWRbmCv/NUjWtumSmGbc+oyWwTtl37AnPpu0OQqiPi00Ds9
-# N3kTE2EHQ+oul8yzZviDGRinnR+XfVhCsQQNbwy+xH9goasVx0N1AYCeFCEOPRy3
-# pAdVQMpotoitCBWRM48aFzAhD7nk7BHVbdLv/h+KvgH+nCtmkbe7jZI=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFPT9aochjwS743ZsUWX8
+# kH1lWhwAMA0GCSqGSIb3DQEBAQUABIIBADOUL0Iy6hYrhqR+3SOHfOJAUu3s/iF1
+# hkedlzB0Y7a7Dc77j90BAyV+X1Uc7muyq/ABpFdrrmrg1tNs1iqJ8gehoh+ai2Ig
+# 4Po9xdZtUjpyCG7olf3pozpyPJOdRxHyqTJqmaLc8z9MfQ2EImMgVXboHgblP2nX
+# jHM8qVBFQsjgwburRxLOIlonCqUtWloqH3TqZnjvsUcwE4LZ5YgjECU/ckSacEpx
+# d4RNuxwNfuar4gP+eMSXEoGspuSNIDlkJoco4TRqFRuGF4PjINcQoi0qsDmAegOE
+# QIL3/DXmFbpMdX+H1eYZMJB28DayVDBCuyB6HO0s4yFZZeucSx1Qu9k=
 # SIG # End signature block
