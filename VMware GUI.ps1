@@ -64,6 +64,7 @@
                            Added delete all option for deleting & power operations on VMs
     @guyrleech 21/06/2021  Added "NICs" column
     @guyrleech 22/06/2021  Added Datastore picker to New VM dialogue. Added move functionality
+    @guyrleech 09/07/2021  Fixed bug where screenshots were being deleted even when not in temp folder
 #>
 
 <#
@@ -3063,7 +3064,7 @@ Function Process-Action
                     [string]$sourceFileViaFolder = ConvertTo-VMwareFolderPath -path $shot -datacenter $datacenter.name -vcenter $global:DefaultVIServer.Name
                     if( ! [string]::IsNullOrEmpty( $screenShotFolder ) -and ! ( Test-Path -Path $screenShotFolder -ErrorAction SilentlyContinue -PathType Container ) )
                     {
-                        $null = New-Item -Path $screenShotFolder -ItemType Directory
+                        $null = New-Item -Path $screenShotFolder -ItemType Directory -Force
                     }
                     [string]$localfile = Join-Path -Path $( if( ! [string]::IsNullOrEmpty( $screenShotFolder ) ) { $screenShotFolder } else { $env:temp }) -ChildPath "$(Get-Date -Format 'HHmmss-ddMMyy')-$(Split-Path -Path $shot -Leaf)"
                     
@@ -3136,13 +3137,16 @@ Function Process-Action
                                         }
                                     }
                                 })
+                                
                                 $screenshotWindow.Add_Unloaded({
                                     $_.Handled = $true
                                     if( $this.PSObject.Properties[ 'ImageFileName' ] )
                                     {
-                                        ## we stored the file name in the parent window because we are async so cannot use variables in the calling function
-                                        Write-Verbose -Message "Deleting screenshot file `"$($this.ImageFileName)`""
-                                        Remove-Item -Path $this.ImageFileName
+                                        if( (Split-Path -Path $this.ImageFileName -Parent) -eq $env:temp )
+                                        {
+                                            Write-Verbose -Message "Deleting screenshot file `"$($this.ImageFileName)`" as in temp folder"
+                                            Remove-Item -Path $this.ImageFileName
+                                        }
                                     }
                                 })
 
@@ -3950,8 +3954,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUz8vpz01H8EM4CEU0pV9pLKeT
-# +bugggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU3+TzWlSLoLVpaoggNzpBuCVA
+# J6GgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -4012,11 +4016,11 @@ if( ! $alreadyConnected -and $connection )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFHQ3V9wwZ65EwX8DNQi3
-# +uwmM8U/MA0GCSqGSIb3DQEBAQUABIIBAEegzQwyVwJzxuJjsRO7CVqKwLJyo63p
-# 6bNbZGZXwjBdQ2+ZxmI4lKknX0UfLtxk1O/sl2hyMJACTm0Nqeks95LfUDTPXxxU
-# 1hCAS8cZ5EL3CsUO+ErDryv2MsA+HtipdS4R4sf4MWGSfkW8rBWScMoE+lhnUeRl
-# HQpclMuhQy+Imwm/S2Ud+ZclAm293lcSWoVlvh1ICzbiamxDB4VeKBqy0zs1fP6L
-# eXX0WJrA9Lgyt8uV+rTsVgQOrdfNhJXgheeTNFiWNHJFoZU/dOa5trjxFFi4lWcR
-# yP8IDHB8kY1WrNOuwVUG7f+lvFPok8YyxD1bBNFijHo0vQ5+51KnRxQ=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFEQTFsyPkM6WE+c8iE5h
+# iusud3RpMA0GCSqGSIb3DQEBAQUABIIBAKqFrL5O6z6SjJVwSNna9eawy66N2AxM
+# 9iuvWN+UM4qPQGNyk0MdDZrdd7TT+TBaW5m9WiouOgwwLIX68rO1SHtENcHWSdHP
+# UUwks332+YdfbFlhwJ3m2aEfgDcAfoCa8rTaOSpzqAeVG0yl8A04ASZnavxnMCAU
+# 9ByOB76OOKuZQxkcweE5Aqr+6yLywrwq5Dyc0S/3y/O4N4+mLH4ADHe4BBf6+VNQ
+# nJLPr/+o1M3Sql1ncnDSbYBQmeVAHYPv+vcIpMhDCXAqdbZ2SrM1qcpiBvRtoZUf
+# 7skra89vClqe8zCLZbUeVu2JrOGTrRUiS6xa2OmJwaKEPl2IhGNnlxg=
 # SIG # End signature block
