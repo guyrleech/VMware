@@ -1,4 +1,5 @@
-﻿
+﻿#requires -version 3
+
 <#
 .SYNOPSIS
     Copy a script to a remote machine via Invoke-VMScript, as doesn't require explicitly specified credentials, and run it.
@@ -42,6 +43,12 @@
 .PARAMETER allLinked
     Connect to all vCenters linked with the ones specified by -vCennter
 
+.PARAMETER OperationTimeoutSec
+    Timeout in seconds of the WMI/CIM operation used to get the remote shares when -copyTo specified
+
+.PARAMETER CIMprotocol
+    The CIM protocol to use in the WMI/CIM operation used to get the remote shares when -copyTo specified
+
 .EXAMPLE
     . '.\Run script in VM.ps1" -scriptFile "C:\Scripts\Remvoe Ghost NICS.ps1" -VMs GLXAPVSMASTS19 -scriptParameters '-nicregex "Intel.*Gigabit" -confirm:$false' -vCenter grl-vcenter04.guyrleech.local
     Copy the script specified to the VM specified using Invoke-VMscript. When copied, run it with the specified parameters
@@ -56,6 +63,7 @@
     Modification History:
 
     2021/08/23  @guyrleech  Initial release
+    2021/08/23  @guyrleech  Changed Get-CimInstance to use Dcom to avoid using PS remoting by default since if PS remoting is enabled, it would be better to use that rather than this script
 #>
 
 <#
@@ -87,7 +95,10 @@ Param
     [ValidateSet('http','https')]
     [string]$protocol ,
     [switch]$forceVcenter ,
-    [switch]$allLinked
+    [switch]$allLinked ,
+    [ValidateSet('dcom','wsman','default')]
+    [string]$CIMprotocol = 'dcom' ,
+    [int]$OperationTimeoutSec = 15
 )
 
 Import-Module -Name VMware.VimAutomation.Core -Verbose:$false
@@ -165,6 +176,11 @@ else
     }
 })
 
+if( ! ( $CIMsessionOption = New-CimSessionOption -Protocol $CIMprotocol ) )
+{
+    Throw "Failed to create CIM session option with protocol $CIMprotocol"
+}
+
 [string]$errorMessage = $null
 
 ## may have been flattened if called bu scheduled task
@@ -214,8 +230,9 @@ ForEach( $virtualMachine in $VMs )
                 $errorMessage = $null
 
                 Write-Verbose -Message "Trying to get file shares from $($VM.Name) to check for $share"
-                [array]$shares = @( Get-CimInstance -ClassName win32_share -ComputerName $VM.Name -ErrorAction SilentlyContinue -OperationTimeoutSec 15 -Filter 'Path IS NOT NULL' -QueryDialect WQL -ErrorVariable CIMerror | Where-Object { $_.Path -match '^[A-Z]:\\' } )
-                if( $null -ne $shares -and $shares.Count )
+                if( ( $cimSession = New-CimSession -ComputerName $VM.Name -SessionOption $CIMsessionOption -ErrorAction SilentlyContinue ) `
+                    -and ( [array]$shares = @( Get-CimInstance -ClassName win32_share -ComputerName $VM.Name -ErrorAction SilentlyContinue -OperationTimeoutSec $OperationTimeoutSec -Filter 'Path IS NOT NULL' -QueryDialect WQL -ErrorVariable CIMerror | Where-Object { $_.Path -match '^[A-Z]:\\' } ) ) `
+                        -and $shares.Count -gt 0 )
                 {
                     Write-Verbose -Message "Checking if share $share exists on $($VM.Name) - got $($shares.Count) file shares"
                     if( -Not ( $ourShare = $shares.Where( { $_.Name -eq $share } ) ) )
@@ -226,6 +243,12 @@ ForEach( $virtualMachine in $VMs )
                 elseif( $null -eq $CIMError -or $CIMError.Count -eq 0 ) ## no error so no suitable shares found
                 {
                     $errorMessage = "No file shares found on $($VM.Name) so cannot use $share"
+                }
+
+                if( $cimSession )
+                {
+                    Remove-CimSession -CimSession $cimSession
+                    $cimSession = $null
                 }
 
                 if( $errorMessage )
@@ -389,11 +412,12 @@ ForEach( $virtualMachine in $VMs )
         }
     }
 }
+
 # SIG # Begin signature block
 # MIINRQYJKoZIhvcNAQcCoIINNjCCDTICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU2oKitXQe6/CcmXhdiK9ssOYp
-# kt6gggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUw/jmdMBa9BOMXHgMhCe6W4jS
+# OQOgggqHMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -454,11 +478,11 @@ ForEach( $virtualMachine in $VMs )
 # BgNVBAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBDb2RlIFNpZ25pbmcgQ0EC
 # EAT946rb3bWrnkH02dUhdU4wCQYFKw4DAhoFAKB4MBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFMTcrHXRsw3nIaZ9Xl4D
-# bQc+OR9jMA0GCSqGSIb3DQEBAQUABIIBAA1jgLsOFQ3xgiCP5C3FdCAl9RSqYD1R
-# uWYk9aMYBUelWe9q7s663HkDL3yAUJPP/PK7tsg6uuPywSmoLTfeGtZnkM99yIMW
-# xcE6uAEBgmvi2Wny651/8oBrYI9ktXrGhSPvhz2lK0+eUbcyYFWCERpl+rBaZgLb
-# AjOfNKiIGm8ubU/3Ojao5c4bgSQvC9Imz9AT5vAVn2JtsE6JAba7TmBHUEj5iZ2G
-# HczbMGCl81fJS6BJogxyImIIz8dOFLGd/uhciFYsQWE39LWkkizDo0XYGVAXM9B/
-# FCL5tLA3IX8Jk4xlct1hsh9WPR4MynpohfLd61yIoWGRV5lkJOr/hHo=
+# CzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFDaX3bWbbyqVWaVKQDA0
+# kG0dosbUMA0GCSqGSIb3DQEBAQUABIIBADbjG1eJ1q38b7qYOq3lVwizWN4/9Wla
+# Dyhgzf5uq09rvzAqORGR9pj6jF+7Klzjy1Tbq+XyB75fUEjB8+hEYtHe9adwdEzG
+# KYoeyxnd0NJxmSD20qX8PSZNTAHd1XK1AfaOPLYkkhfw5iZ6W/ZZivQ4D8k0xLsf
+# CTvxJKFKQsHmbADgKRsHubXs+lwkbqpb6ErVb1GLHM6GThKewg6Rf7T3NldsixsE
+# VXDkBoaCNFU3AAlywTQdP8YPHbATcKzGDvoEBGQogsgC2CC2JSd+/U14nKarwRV/
+# 6cz+vzGSyjotjSjVAxuWsMKsFUf+9rwlHYkmuuPEt6UXzgCvstBxNJ8=
 # SIG # End signature block
