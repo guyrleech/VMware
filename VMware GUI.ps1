@@ -66,6 +66,7 @@
     @guyrleech 22/06/2021  Added Datastore picker to New VM dialogue. Added move functionality
     @guyrleech 09/07/2021  Fixed bug where screenshots were being deleted even when not in temp folder
     @guyrleech 22/09/2021  Changes to HTML handling for pwsh 7.x
+    @guyrleech 23/09/2021  Fixed bug where saved credential from .crud file not being used for CD mount browser
 #>
 
 <#
@@ -1681,8 +1682,9 @@ Function Show-DatastoreFileChooser
         }
         Catch
         {
+            Write-Verbose -Message "Error for $($webrequestParams.GetEnumerator()|select-object name,value|Format-Table|out-string) : $($_.ToString)"
             ## if unauthorised, prompt for credentials
-            if( $_.ToString() -match '\(401\)' `
+            if( $_.ToString() -match '\b401\b' `
                 -and ( $global:credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) )
             {
                 $webrequestParams.Credential = $global:credential
@@ -3604,6 +3606,7 @@ if( ! $alreadyConnected )
     {
         Write-Verbose "Connecting to $($server -join ',') as $($credential.username)"
         $connectParameters.Add( 'Credential' , $credential )
+        $global:credential = $credential
     }
     
     [hashtable]$powerCLISettings = @{
@@ -3991,8 +3994,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIIZsAYJKoZIhvcNAQcCoIIZoTCCGZ0CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUEhO8oFLSJvi7XJ48dJ6/nsbI
-# qlygghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUdhgfA3FPEuhRa8KwDk9hPdVR
+# 0VWgghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
 # AQsFADByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFz
 # c3VyZWQgSUQgVGltZXN0YW1waW5nIENBMB4XDTIxMDEwMTAwMDAwMFoXDTMxMDEw
@@ -4108,23 +4111,23 @@ if( ! $alreadyConnected -and $connection )
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQUF6LeUxX9JFfh7LGRdtnsR/s/gpEwDQYJKoZIhvcNAQEBBQAEggEA
-# KDOsyDTJs0sBCxxxRtNnPkFY3FGpQeT4umg2x29VIFvEAiRd11B2/mNUDA9i2Slo
-# DPsJZ7/5dzzLQQWDyNSqFZG6fTXHS1oKPBgXBJwpUkPjkJ1WBt56uzBkKkiu6By0
-# emyDqEwiwzqU7nNna+Z5/e/XW/RRVh7Jpo2jNrtWnxrouSob/0oaPaen+mKjX/xo
-# tHQlaFIoupGcYJAOcr1tdSdZyubG+6ILNoZJ6aqVBV4t7CeOeVAT0wfN0wJT+WNQ
-# 3QVgR3sb6o8FuXOe5EfvGhlgiSXliF1jAhxkEFot7QXT8JkbtlwxZ8ijunf6l7m0
-# mHfj6ai11iIvPHXvCEq6aaGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
+# 9w0BCQQxFgQUawbM9rd5JmrUX7YnCP/dLBxQXiIwDQYJKoZIhvcNAQEBBQAEggEA
+# T9LI1yI6SR4nYCNf20sEcCTj4BkzvnYYMjCAFLZDH4372CDOYiWDXxJMl0lDmwGR
+# 3V1lm1LM9RZZdsyoHoCvU5ODAJZC7pTYBn0ImL7X0GTEso2UnuXQuu6H1M6tayA+
+# 1/FhaSRZM9zvu+5jqFwQOQar/PO0ACu7YBDUNtznncd9K+Z6hm3hI+dVaqGPd6SU
+# ElT8yWT9EtuTA3iCaALX+YXyU++XMCeeCZovMVWr6h791bx76ybBswltXJb1XXzS
+# bMp1cmcA6owxMg968UVwu3uFl8mU6i5J1qYXhVIFo/nOnI0epkiC5HeI9F5BsurO
+# CNG4bLJpuGhfjyuCBXRORaGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
 # hjByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQL
 # ExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3Vy
 # ZWQgSUQgVGltZXN0YW1waW5nIENBAhANQkrgvjqI/2BAIc4UAPDdMA0GCWCGSAFl
 # AwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUx
-# DxcNMjEwOTIyMjIzMDI2WjAvBgkqhkiG9w0BCQQxIgQgvI6uOHDy2twCTzxEUxyB
-# wM13afJrTNNHNk6OqOKranMwDQYJKoZIhvcNAQEBBQAEggEAaJqEm5fclLrXeMLM
-# OgFvfgjxtfNZQyFHI8yMxR8RuE48vrPI8eH/yNIC3rvIvw0qrf35aKD7rRgny1Qt
-# rjFfByyuTvCYASXgllPNRx6Sgmxylz4UZZmQiF5zTgaZB5BzGZDjG2MHikAZpnAE
-# 4no/wKi/VJGN8KC6FM7KXCMayyAX2MpSzaflR9Y9u/S5PaYOqs+38XYurnTQpycS
-# QAOziMmuvjBrx4qFcITf0VKq6geWC+cz9pWWD3ADnX7OM+Hw3enoWbg09+1BmMQV
-# bTQBDWrWZLNQRrp+zD27J7XfmGNgqTbExetcvy75wNJwm+3C2Uuhs0Ld0S5cc0/U
-# MVwy8g==
+# DxcNMjEwOTIzMDg1NzIwWjAvBgkqhkiG9w0BCQQxIgQgshsUQpak5jvDaFwJAQv6
+# 4l8oySl6/xEZr0TS+v4dcUswDQYJKoZIhvcNAQEBBQAEggEAd1/KL1WoPx++N/td
+# puf8Fc7Gb9MM5gg19cIriAV57cbn6iTSwyuPRjLZybCuczvqoo8ph376Exg8DcZg
+# dzS2hWLTAZOmnnClGqSQpGg+PtayIpUqI6ICVKabDPP7YVMTjIlg+MQq/iRraCyn
+# 0u+CXR+yxKZP/QnMY5otdfMUEYVhywq/CadnaDr0h4VBNz3MFIescOHCNFxYBkQ3
+# 5t85f32m0n2favXT6FCiL3YFcH5YhWRLLNOaPZXqWDhR+4+g4yx2p959EPItMtrE
+# xqZMue56AWf04vJnC+08x5JPmvu55DrEQUdfWGgmHT8ue0JUufFb00FU0+d45Bgi
+# 6CIkyg==
 # SIG # End signature block
