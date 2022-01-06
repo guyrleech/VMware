@@ -66,7 +66,7 @@
     @guyrleech 22/06/2021  Added Datastore picker to New VM dialogue. Added move functionality
     @guyrleech 09/07/2021  Fixed bug where screenshots were being deleted even when not in temp folder
     @guyrleech 22/09/2021  Changes to HTML handling for pwsh 7.x
-    @guyrleech 23/09/2021  Fixed bug where saved credential from .crud file not being used for CD mount browser
+    @guyrleech 06/01/2022  Added -mstscusername to set username for mstsc
 #>
 
 <#
@@ -178,6 +178,10 @@ The VM property to sort the display on.
 
 Folder in which to store console screenshot files. Uuser's temp folder is used if not specified and files deleted.
 
+.PARAMETER setmstscUsername
+
+Set the username in the registry for the mstsc connection if it does not exist - saves having to enter them if logging on as a different user
+
 .EXAMPLE
 
 & '.\VMware GUI.ps1' -server grl-vcenter01 -username guy@leech.com -saveCredentials -doubleClick console
@@ -247,7 +251,8 @@ Param
     [string]$remoteScriptPath ,
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
-    [string]$vmwareModule = 'VMware.VimAutomation.Core'
+    [string]$vmwareModule = 'VMware.VimAutomation.Core' ,
+    [switch]$setmstscUsername
 )
 
 [hashtable]$powerstate = @{
@@ -296,7 +301,7 @@ $pinvokeCode = @'
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:VMWare_GUI"
         mc:Ignorable="d"
-        Title="Simple VMware Console (SVC) by @guyrleech" Height="500" Width="1000">
+        Title="Simple VMware Console (SVC) by @guyrleech" Height="500" Width="1000" >
     <DockPanel Margin="10,10,-70,2" HorizontalAlignment="Left" >
         <Button x:Name="btnHosts" Content="_Hosts" HorizontalAlignment="Left" Height="35"  Margin="10,0,0,0" VerticalAlignment="Bottom" Width="135" DockPanel.Dock="Bottom"/>
         <Button x:Name="btnFilter" Content="_Filter" HorizontalAlignment="Left" Height="35" Margin="200,0,0,-35" VerticalAlignment="Bottom" Width="135" DockPanel.Dock="Bottom"/>
@@ -1682,9 +1687,8 @@ Function Show-DatastoreFileChooser
         }
         Catch
         {
-            Write-Verbose -Message "Error for $($webrequestParams.GetEnumerator()|select-object name,value|Format-Table|out-string) : $($_.ToString)"
             ## if unauthorised, prompt for credentials
-            if( $_.ToString() -match '\b401\b' `
+            if( $_.ToString() -match '\(401\)' `
                 -and ( $global:credential = Get-Credential -Message "For $global:DefaultVIServer/folder" ) )
             {
                 $webrequestParams.Credential = $global:credential
@@ -2822,7 +2826,20 @@ Function Process-Action
                         }
 
                         ## See if we have a stored credential for this and if so only create .rdp file if extraRDPSettings set
-                        [string]$storedCredential = cmdkey.exe /list:TERMSRV/$address | Where-Object { $_ -match 'User:' }
+                        if( -Not ( [string]$storedCredential = cmdkey.exe /list:TERMSRV/$address | Where-Object { $_ -match 'User:' } ) )
+                        {
+                            if( $setmstscUsername -and $rdpusername )
+                            {
+                                [string]$credentialsKey = Join-Path -Path 'HKCU:\SOFTWARE\Microsoft\Terminal Server Client\Servers' -ChildPath $address
+                                if( -Not ( Get-ItemProperty -Path $credentialsKey -Name 'UsernameHint' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty 'UsernameHint' -ErrorAction SilentlyContinue ) )
+                                {
+                                    Write-Verbose -Message "Setting username hint in $credentialsKey to $rdpusername"
+                                    [void](New-Item -Path $credentialsKey -Force -ItemType 'Key')
+                                    Set-ItemProperty -Path $credentialsKey -Name 'UsernameHint' -Value $rdpusername
+                                }
+                            }
+                        }
+
                         [string]$thisRdpFileName = $rdpFileName
                         if( $rdpExtrasFileName )
                         {
@@ -2940,8 +2957,7 @@ Function Process-Action
                             if( $Error.Count -and $Error[0].Exception.Message -match 'The session is not authenticated' )
                             {
                                 Write-Verbose "Gettting new session for ticket"
-                                $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue
-                                if( $session )
+                                if( $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue )
                                 {
                                     $ticket = $Session.AcquireCloneTicket()
                                 }
@@ -2951,7 +2967,7 @@ Function Process-Action
                                     {
                                         Write-Warning "Failed to connect to VI server"
                                     }
-                                    if( ! ( $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue ) )
+                                    if( $Session = Get-View -Id Sessionmanager -ErrorAction SilentlyContinue )
                                     {
                                         $ticket = $Session.AcquireCloneTicket()
                                     }
@@ -3462,11 +3478,9 @@ if( ! $importedModule )
     Throw "Failed to import VMware module $vmwareModule. It can be installed via Install-Module if required. Error was `"$($importError|Select-Object -ExpandProperty Exception|Select-Object -ExpandProperty Message)`""
 }
 
-Get-Variable -Name WPF*|Select-Object -ExpandProperty Name | Write-Debug
-
 [bool]$alreadyConnected = $false
 
-Add-Type -MemberDefinition $pinvokeCode -Name 'User32' -Namespace 'Win32' -UsingNamespace System.Text -Debug:$false
+Add-Type -MemberDefinition $pinvokeCode -Name 'User32' -Namespace 'Win32' -UsingNamespace System.Text -Debug:$false -Verbose:$False
 
 $connection = $null
 
@@ -3478,7 +3492,7 @@ if( Get-Variable -Scope Global -Name DefaultVIServers -ErrorAction SilentlyConti
         $alreadyConnected = $true
         if( ! $PSBoundParameters[ 'username' ] )
         {
-            $username = $existingServers|Group-Object -Property User|Sort-Object -Property Count -Descending|Select-Object -First 1 -ExpandProperty Name
+            $username = $existingServers | Group-Object -Property User | Sort-Object -Property Count -Descending | Select-Object -First 1 -ExpandProperty Name
         }
         Write-Verbose -Message "Already connected to $($existingServers.Name -join ' , ') username $username"
         ## Check not connected to same server
@@ -3546,7 +3560,8 @@ if( ! $alreadyConnected )
         }
     }
 
-    if( ! $passThru -and ! $credential )
+    ## if $null passed for credential, this overrides credential file to allow it to be updated
+    if( ! $passThru -and -Not $PSBoundParameters.ContainsKey( 'credential' ) )
     {
         [string]$joinedServers = ($server|Sort-Object) -join ','
         [string]$credentialFilter = $(if( ! [string]::IsNullOrEmpty( $username ) ) { "$($username -replace '\\' , ';' ).$joinedServers.crud"  } else { "*.$joinedServers.crud"  })
@@ -3602,11 +3617,15 @@ if( ! $alreadyConnected )
         }
     }
 
+    if( $PSBoundParameters.ContainsKey( 'credential' ) -and $null -eq $credential )
+    {
+        $credential = Get-Credential -Message "For $($connectParameters.Server) at $(Get-Date -Format G) (pid $pid)"
+    }
+
     if( $credential )
     {
         Write-Verbose "Connecting to $($server -join ',') as $($credential.username)"
         $connectParameters.Add( 'Credential' , $credential )
-        $global:credential = $credential
     }
     
     [hashtable]$powerCLISettings = @{
@@ -3639,10 +3658,11 @@ if( ! $alreadyConnected )
 }
 
 [string[]]$rdpCredential = $null
+[string]$rdpusername = $null
 
 ## Write to an rdp file so we can pass to mstsc in case on non-domain joined device or if using different credentials
 [string]$theUser = $null
-if( ($theUser = ($credential|Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue)) -or ($theUser = $username ))
+if( ($theUser = ($credential | Select-Object -ExpandProperty UserName -ErrorAction SilentlyContinue)) -or ($theUser = $username ))
 {
     Write-Verbose "Connecting as $theUser"
     [string]$rdpusername = $theUser
@@ -3994,8 +4014,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIIZsAYJKoZIhvcNAQcCoIIZoTCCGZ0CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUdhgfA3FPEuhRa8KwDk9hPdVR
-# 0VWgghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUGZuGvk+aAEYhtUzjyhsMCgir
+# OxGgghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
 # AQsFADByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFz
 # c3VyZWQgSUQgVGltZXN0YW1waW5nIENBMB4XDTIxMDEwMTAwMDAwMFoXDTMxMDEw
@@ -4111,23 +4131,23 @@ if( ! $alreadyConnected -and $connection )
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQUawbM9rd5JmrUX7YnCP/dLBxQXiIwDQYJKoZIhvcNAQEBBQAEggEA
-# T9LI1yI6SR4nYCNf20sEcCTj4BkzvnYYMjCAFLZDH4372CDOYiWDXxJMl0lDmwGR
-# 3V1lm1LM9RZZdsyoHoCvU5ODAJZC7pTYBn0ImL7X0GTEso2UnuXQuu6H1M6tayA+
-# 1/FhaSRZM9zvu+5jqFwQOQar/PO0ACu7YBDUNtznncd9K+Z6hm3hI+dVaqGPd6SU
-# ElT8yWT9EtuTA3iCaALX+YXyU++XMCeeCZovMVWr6h791bx76ybBswltXJb1XXzS
-# bMp1cmcA6owxMg968UVwu3uFl8mU6i5J1qYXhVIFo/nOnI0epkiC5HeI9F5BsurO
-# CNG4bLJpuGhfjyuCBXRORaGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
+# 9w0BCQQxFgQUbnXH2idfjndMZYN4kvAtGRb8O1wwDQYJKoZIhvcNAQEBBQAEggEA
+# Oww/aq6ZYQHfrKzW+NaT7wA1GkWnTFXJvWHemGh0/f9qiLpitiJMsChyORtQZhbp
+# RuJqqhwDzJ/YafC1cIE0JtF0p9LHRualf7/VUV1+zKGbEChq/bcABnRz06xDQ0kS
+# ic7CHD1XIfqXQlTJUQabXazLOMI8s6bHcUAXuOzBUlSQlMDf7IH0CAtXAXqjukCO
+# a19Ejji22Dlcrn9mYYjI4CcSHNxeIOqH3JrDlOGrMx5yKlGwSVAg9Cm2UqoYyxVM
+# LUfZj9gl3oM7w+Bo8jrdRMGeTMBO431LEe5ZIXZ+jNuuYnZAcxu2Kjz/5kGdM0/6
+# pLwBqRxZ1O96mbBPeFo2xKGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
 # hjByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQL
 # ExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3Vy
 # ZWQgSUQgVGltZXN0YW1waW5nIENBAhANQkrgvjqI/2BAIc4UAPDdMA0GCWCGSAFl
 # AwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUx
-# DxcNMjEwOTIzMDg1NzIwWjAvBgkqhkiG9w0BCQQxIgQgshsUQpak5jvDaFwJAQv6
-# 4l8oySl6/xEZr0TS+v4dcUswDQYJKoZIhvcNAQEBBQAEggEAd1/KL1WoPx++N/td
-# puf8Fc7Gb9MM5gg19cIriAV57cbn6iTSwyuPRjLZybCuczvqoo8ph376Exg8DcZg
-# dzS2hWLTAZOmnnClGqSQpGg+PtayIpUqI6ICVKabDPP7YVMTjIlg+MQq/iRraCyn
-# 0u+CXR+yxKZP/QnMY5otdfMUEYVhywq/CadnaDr0h4VBNz3MFIescOHCNFxYBkQ3
-# 5t85f32m0n2favXT6FCiL3YFcH5YhWRLLNOaPZXqWDhR+4+g4yx2p959EPItMtrE
-# xqZMue56AWf04vJnC+08x5JPmvu55DrEQUdfWGgmHT8ue0JUufFb00FU0+d45Bgi
-# 6CIkyg==
+# DxcNMjIwMTA2MTMyOTU3WjAvBgkqhkiG9w0BCQQxIgQgEdqaiHp2CnpQ8dL/wN5e
+# G8JlnX+Y/aaOudZ7hTSGWGwwDQYJKoZIhvcNAQEBBQAEggEAaxP/+qdf/L94rtf/
+# AHcYuHfKtvUyHWe80zoAjoRdAQihAE/g64FVI8R8CPYsBV9BLxp+ZTGlpQj1q/T7
+# hNz8ridWsxM6a9+40bgH0uhdqXPRFPz7PgnGZO2wGaFpJWL3desBElV9rwpdFSZ6
+# 0rgOG9JtlaHgmhVEYULDrrkQzT86xzich2cxRoQps6DK4/1yum4V2ywMOlABhQhk
+# kG7w41Q9v+/Ss5uZWotpQonNc9rQOle8ymkcUFHHbdd0BHbmCVfRHttAszLaRT4Y
+# 1m+BJ79dN7O2iiHxghBjA4A3rCQWJOjI5c0slh10qTylNu7I92Uys/vUGyeQ1R3o
+# 2XjiIw==
 # SIG # End signature block
