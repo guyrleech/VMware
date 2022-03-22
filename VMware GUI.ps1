@@ -67,6 +67,7 @@
     @guyrleech 09/07/2021  Fixed bug where screenshots were being deleted even when not in temp folder
     @guyrleech 22/09/2021  Changes to HTML handling for pwsh 7.x
     @guyrleech 06/01/2022  Added -mstscusername to set username for mstsc
+    @guyrleech 22/03/2022  Added "Shutdown, take snapshot, start" to take snapshot
 #>
 
 <#
@@ -101,6 +102,10 @@ The name of a VM or pattern to include in the GUI
 .PARAMETER performanceData
 
 Enable fetching and displaying of per-VM performance data. Can be changed via a toggle within the UI too
+
+.PARAMETER powerActionWaitTimeSeconds
+
+Maximum time to wait in seconds for a VM to shutdown before taking a snapshot
 
 .PARAMETER share
 
@@ -204,7 +209,7 @@ RDP file settings for -extraRDPSettings option available at https://docs.microso
 #>
 
 <#
-Copyright © 2021 Guy Leech
+Copyright © 2022 Guy Leech
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, 
 including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -244,6 +249,7 @@ Param
     [string]$exclude = 'uptime' ,
     [string]$share = 'C$' ,
     [switch]$noReuseMstsc ,
+    [int]$powerActionWaitTimeSeconds = 120 ,
     [int]$maxEvents = 10000 ,
     [int]$OutputWidth = 400 ,
     [string]$screenShotFolder ,
@@ -714,12 +720,13 @@ $pinvokeCode = @'
     <Grid x:Name="gridTakeSnapshotOptions">
         <Label Content="Name" HorizontalAlignment="Left" Margin="63,67,0,0" VerticalAlignment="Top" Height="34" Width="99"/>
         <Label Content="Description" HorizontalAlignment="Left" Margin="63,138,0,0" VerticalAlignment="Top" Height="34" Width="99"/>
-        <CheckBox x:Name="chckSnapshotMemory" Content="Snapshot the virtual machine's memory" HorizontalAlignment="Left" Margin="63,248,0,0" VerticalAlignment="Top" Height="22" Width="368"/>
-        <CheckBox x:Name="chkSnapshotQuiesce" Content="Quiesce guest file system (Needs VMware Tools installed)" HorizontalAlignment="Left" Margin="63,309,0,0" VerticalAlignment="Top" Width="403"/>
+        <CheckBox x:Name="chckSnapshotMemory" Content="Snapshot the virtual machine's _memory" HorizontalAlignment="Left" Margin="63,248,0,0" VerticalAlignment="Top" Height="22" Width="368"/>
+        <CheckBox x:Name="chkSnapshotQuiesce" Content="_Quiesce guest file system (Needs VMware Tools installed)" HorizontalAlignment="Left" Margin="63,309,0,0" VerticalAlignment="Top" Width="403"/>
         <Button x:Name="btnTakeSnapshotOk" Content="OK" HorizontalAlignment="Left" Margin="68,366,0,0" VerticalAlignment="Top" Width="75" IsDefault="True"/>
         <Button x:Name="btnTakeSnapshotCancel" Content="Cancel" HorizontalAlignment="Left" Margin="171,366,0,0" VerticalAlignment="Top" Width="75" IsCancel="True"/>
         <TextBox x:Name="txtSnapshotName" HorizontalAlignment="Left" Height="22" Margin="196,67,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="333"/>
         <TextBox x:Name="txtSnapshotDescription" HorizontalAlignment="Left" Height="89" Margin="196,147,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="326"/>
+        <CheckBox x:Name="chckSnapshotShutdownStart" Content="_Shutdown, take snapshot, start" HorizontalAlignment="Left" Margin="63,277,0,0" VerticalAlignment="Top" Height="22" Width="368"/>
 
     </Grid>
 </Window>
@@ -1043,24 +1050,88 @@ Function Process-Snapshot
                 $takeSnapshotForm.DialogResult = $true 
                 $takeSnapshotForm.Close()  })
 
-            if( $takeSnapshotForm.ShowDialog() )
+            if( $VM = Get-VM -Id $VMId )
             {
-                $VM = Get-VM -Id $VMId
+                if( $VM.PowerState -eq 'PoweredOff' ) 
+                {
+                    $wpfchkSnapshotQuiesce.IsEnabled = $false
+                    $WPFchckSnapshotMemory.IsEnabled = $false
+                }
+                elseif( $VM.Guest.State -eq 'NotRunning' )
+                {
+                    $wpfchckSnapshotShutdownStart.IsEnabled = $false ## won't be able to shut it down cleanly so don't offer it
+                }
 
-                ## Get Data from form and take snapshot
-                [hashtable]$parameters = @{ 'VM' = $vm ; 'RunAsync' = $true }
-                if( ! [string]::IsNullOrEmpty( $WPFtxtSnapshotName.Text ) )
+                if( $takeSnapshotForm.ShowDialog() )
                 {
-                    $parameters.Add( 'Name' , $WPFtxtSnapshotName.Text )
-                }
-                if( ! [string]::IsNullOrEmpty( $WPFtxtSnapshotDescription.Text ) )
-                {
-                    $parameters.Add( 'Description' , $WPFtxtSnapshotDescription.Text )
-                }
-                $parameters.Add( 'Quiesce' , $wpfchkSnapshotQuiesce.IsChecked )
-                $parameters.Add( 'Memory' , $WPFchckSnapshotMemory.IsChecked )
+                    if( $VM = Get-VM -Id $VMId )
+                    {
+                        ## Get Data from form and take snapshot
+                        [hashtable]$parameters = @{ 'VM' = $vm ; 'RunAsync' = $true }
+                        if( ! [string]::IsNullOrEmpty( $WPFtxtSnapshotName.Text ) )
+                        {
+                            $parameters.Add( 'Name' , $WPFtxtSnapshotName.Text )
+                        }
+                        if( ! [string]::IsNullOrEmpty( $WPFtxtSnapshotDescription.Text ) )
+                        {
+                            $parameters.Add( 'Description' , $WPFtxtSnapshotDescription.Text )
+                        }
+                        $parameters.Add( 'Quiesce' , $wpfchkSnapshotQuiesce.IsChecked )
+                        $parameters.Add( 'Memory' , $WPFchckSnapshotMemory.IsChecked )
          
-                New-Snapshot @parameters
+                        [string]$answer = 'yes'
+
+                        if( $wpfchckSnapshotShutdownStart.IsChecked )
+                        {
+                            if( $VM.PowerState -ne 'PoweredOff' -and ( $answer = [Windows.MessageBox]::Show( "VM $($VM.Name)" , "Confirm Shutdown & Startup" , 'YesNo' ,'Question' ) ) -and $answer -ieq 'yes' )
+                            {
+                                $shutdownError = $null
+                                if( -Not ( $guest = Shutdown-VMGuest -VM $VM -ErrorVariable shutdownError -Confirm:$false ) )
+                                {
+                                    $answer = 'abort'
+                                    [void][Windows.MessageBox]::Show( $shutdownError , "Shutdown Error for $($VM.Name)" , 'Ok' ,'Error' )
+                                }
+                                else
+                                {
+                                    [datetime]$endWaitTime = [datetime]::Now.AddSeconds( $powerActionWaitTimeSeconds )
+                                    Write-Verbose -Message "$(Get-Date -Format G): waiting for VM to shutdown until $(Get-Date -Date $endWaitTime -Format G)"
+                                    do
+                                    {
+                                        Start-Sleep -Seconds 5
+                                        $VM = Get-VM -Id $VMId
+                                    }
+                                    while( $VM -and $VM.PowerState -ne 'PoweredOff' -and [datetime]::Now -le $endWaitTime )
+                                    
+                                    Write-Verbose -Message "$(Get-Date -Format G): finished waiting for VM $($VM.Name) to shutdown - power state is $($VM|Select-Object -ExpandProperty PowerState)"
+
+                                    if( -Not $VM -or $VM.PowerState -ne 'PoweredOff' )
+                                    {
+                                        [void][Windows.MessageBox]::Show( "Timed out waiting $powerActionWaitTimeSeconds seconds for shutdown to complete" , "Shutdown Error for $($VM.Name)" , 'Ok' ,'Error' )
+                                        $answer = 'abort'
+                                    }
+                                    $parameters[ 'RunAsync' ] = $false
+                                }
+                            }
+                        }
+
+                        if( $answer -ieq 'yes' )
+                        {
+                            New-Snapshot @parameters
+                            if( $? -and $wpfchckSnapshotShutdownStart.IsChecked )
+                            {
+                                Start-VM -VM $VM -RunAsync
+                            }
+                        }
+                    }
+                    else
+                    {
+                        [void][Windows.MessageBox]::Show( "Failed to get VM" , "Snapshot Error for $($VM.Name)" , 'Ok' ,'Error' )
+                    }
+                }
+            }
+            else
+            {
+                [void][Windows.MessageBox]::Show( "Failed to get VM" , "Snapshot Error for $($VM.Name)" , 'Ok' ,'Error' )
             }
         }
     }
@@ -4014,8 +4085,8 @@ if( ! $alreadyConnected -and $connection )
 # SIG # Begin signature block
 # MIIZsAYJKoZIhvcNAQcCoIIZoTCCGZ0CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUGZuGvk+aAEYhtUzjyhsMCgir
-# OxGgghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU1CWrRoXW2gLo1Y+OLtSJKCH9
+# uMWgghS+MIIE/jCCA+agAwIBAgIQDUJK4L46iP9gQCHOFADw3TANBgkqhkiG9w0B
 # AQsFADByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFz
 # c3VyZWQgSUQgVGltZXN0YW1waW5nIENBMB4XDTIxMDEwMTAwMDAwMFoXDTMxMDEw
@@ -4131,23 +4202,23 @@ if( ! $alreadyConnected -and $connection )
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQUbnXH2idfjndMZYN4kvAtGRb8O1wwDQYJKoZIhvcNAQEBBQAEggEA
-# Oww/aq6ZYQHfrKzW+NaT7wA1GkWnTFXJvWHemGh0/f9qiLpitiJMsChyORtQZhbp
-# RuJqqhwDzJ/YafC1cIE0JtF0p9LHRualf7/VUV1+zKGbEChq/bcABnRz06xDQ0kS
-# ic7CHD1XIfqXQlTJUQabXazLOMI8s6bHcUAXuOzBUlSQlMDf7IH0CAtXAXqjukCO
-# a19Ejji22Dlcrn9mYYjI4CcSHNxeIOqH3JrDlOGrMx5yKlGwSVAg9Cm2UqoYyxVM
-# LUfZj9gl3oM7w+Bo8jrdRMGeTMBO431LEe5ZIXZ+jNuuYnZAcxu2Kjz/5kGdM0/6
-# pLwBqRxZ1O96mbBPeFo2xKGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
+# 9w0BCQQxFgQUfD3cvJe/NyW6SoYktd0Q2uXx74wwDQYJKoZIhvcNAQEBBQAEggEA
+# QIyS2mKeljt3Q3LbqMtSnRhp9CSr65Lf2nFbOAge7RLEK5aMNxFVglyIRqvBvGM1
+# qoO2xdxWoBqGqBOAggNYNZZ/XsMwXaGdD5TPsngo70CaZM422ViTSnydLMethOTi
+# D135yExyYpKaq7YK4jYYqW0SlYUwq/wAkOoxA8ZmzuyiTeWxT/+3ybbzyixIj2Ax
+# j0bEzvlslTVBDbNFpvFwyGVO/eBy2IIKNqjzDOMecnlXlpHTxpc7bQFE/fshUc1I
+# R5+UTdHHkng/UDG3BG35vCc5WcJKCtbE8+s/k5pqqf88bnJ/ufpxFbnbYDlA/9BJ
+# bx7KzPofIcPdx4vCeNU/laGCAjAwggIsBgkqhkiG9w0BCQYxggIdMIICGQIBATCB
 # hjByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQL
 # ExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3Vy
 # ZWQgSUQgVGltZXN0YW1waW5nIENBAhANQkrgvjqI/2BAIc4UAPDdMA0GCWCGSAFl
 # AwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUx
-# DxcNMjIwMTA2MTMyOTU3WjAvBgkqhkiG9w0BCQQxIgQgEdqaiHp2CnpQ8dL/wN5e
-# G8JlnX+Y/aaOudZ7hTSGWGwwDQYJKoZIhvcNAQEBBQAEggEAaxP/+qdf/L94rtf/
-# AHcYuHfKtvUyHWe80zoAjoRdAQihAE/g64FVI8R8CPYsBV9BLxp+ZTGlpQj1q/T7
-# hNz8ridWsxM6a9+40bgH0uhdqXPRFPz7PgnGZO2wGaFpJWL3desBElV9rwpdFSZ6
-# 0rgOG9JtlaHgmhVEYULDrrkQzT86xzich2cxRoQps6DK4/1yum4V2ywMOlABhQhk
-# kG7w41Q9v+/Ss5uZWotpQonNc9rQOle8ymkcUFHHbdd0BHbmCVfRHttAszLaRT4Y
-# 1m+BJ79dN7O2iiHxghBjA4A3rCQWJOjI5c0slh10qTylNu7I92Uys/vUGyeQ1R3o
-# 2XjiIw==
+# DxcNMjIwMzIyMjA1MjU1WjAvBgkqhkiG9w0BCQQxIgQgPyDi43sHial7Yet7T6nJ
+# n4rh2iWBeq704X44fQE8qVMwDQYJKoZIhvcNAQEBBQAEggEAkVaXJx2v+ctcEUzQ
+# iQdhj04qolxJq9Dfcw9x6ZfDo754PGshxuHhkkEZ1QHyFS1LdQ9XphciDAuhQ2w1
+# bjD9RuIIz30DYcJvy5vwTxrKF7xcPTMlz/8SNGRyQNxAnxxzrsnxwxamdte9Elje
+# 8Z1XOgrBBWOISVnoq2uaFE2kbNrvCwsjOvFhZznNXQfLrpWQTgCPhYCEH78cjhjp
+# K5T55kb99mvQyB9x034JeJtmS39XhbhWdO3SvmyyBMgtb6RmwaJStPDBguLDadDn
+# SW7p425ZVlG9RJvarYlzALBzfvyEdyLM/edI0vZGC+rhtSWumPjV885wgRo1153K
+# 6JEgUA==
 # SIG # End signature block
