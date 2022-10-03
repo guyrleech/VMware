@@ -70,6 +70,10 @@
     @guyrleech 22/03/2022  Added "Shutdown, take snapshot, start" to take snapshot
     @guyrleech 31/03/2022  Added extra fields to datastore window
     @guyrleech 03/05/2022  Added free GB to datastore dropdown in new VM window
+    @guyrleech 19/07/2022  Added -verbose:$false to Get-Snapshot to reduce non-useful verbose output
+    @guyrleech 12/08/2022  Added display of screen resolutions to mstsc custom dialogue
+    @guyrleech 05/09/2022  Fixed button placement issue when resizing screenshot dialogue
+    @guyrleech 03/10/2022  Added code to check machine name length when creating new from template
 #>
 
 <#
@@ -260,6 +264,7 @@ Param
     [string[]]$extraRDPSettings = @( 'drivestoredirect:s:*' ) ,
     [string]$regKey = 'HKCU:\Software\Guy Leech\Simple VMware Console' ,
     [string]$vmwareModule = 'VMware.VimAutomation.Core' ,
+    [string]$rdpusername ,
     [switch]$setmstscUsername
 )
 
@@ -372,7 +377,7 @@ $pinvokeCode = @'
         Title="New VM from Template" Height="606.922" Width="800">
     <Grid Margin="0,0,0,-72">
         <TextBox x:Name="textboxNewVMName" HorizontalAlignment="Left" Height="34" Margin="197,33,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300"/>
-        <TextBox x:Name="textboxNewVMDescription" HorizontalAlignment="Left" Height="34" Margin="197,91,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300" SpellCheck.IsEnabled="True"/>
+        <TextBox x:Name="textboxNewVMDescription" HorizontalAlignment="Left" Height="34" Margin="197,91,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="300" SpellCheck.IsEnabled="False"/>
         <ComboBox x:Name="comboboxTemplate" HorizontalAlignment="Left" Height="34" Margin="197,160,0,0" VerticalAlignment="Top" Width="300"/>
         <ComboBox x:Name="comboboxCustomisation" HorizontalAlignment="Left" Height="34" Margin="197,229,0,0" VerticalAlignment="Top" Width="300"/>
         <ComboBox x:Name="comboboxResourcePool" HorizontalAlignment="Left" Height="34" Margin="197,285,0,0" VerticalAlignment="Top" Width="300"/>
@@ -441,10 +446,54 @@ $pinvokeCode = @'
         </Grid>
         <Button x:Name="btnConnect" Grid.ColumnSpan="2" Content="Connect" HorizontalAlignment="Left" Height="43" Margin="41,366,0,0" VerticalAlignment="Top" Width="134" IsDefault="True"/>
         <Button x:Name="btnCancel" Content="Cancel" HorizontalAlignment="Left" Height="43" Margin="286,366,0,0" VerticalAlignment="Top" Width="134" Grid.Column="1" IsCancel="True"/>
+        <Label Grid.Column="1" Content="Displays" HorizontalAlignment="Left" Height="27" Margin="420,10,0,0" VerticalAlignment="Top" Width="274"/>
+        <Grid Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Top">
+            <DataGrid x:Name="datagridDisplays" HorizontalAlignment="Left" Height="155" VerticalAlignment="Top" Width="292" Margin="428,47,0,0" CanUserResizeColumns="True" CanUserResizeRows="False" />
+
+        </Grid>
 
     </Grid>
 </Window>
 '@
+
+<#
+<Window x:Class="VMWare_GUI.MSTSC"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="MSTSC" Height="450" Width="800">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="67*"/>
+            <ColumnDefinition Width="725*"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="txtboxMstscWidth" HorizontalAlignment="Left" Height="25" Margin="126,70,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="245" Grid.Column="1"/>
+        <TextBox x:Name="txtboxMstscHeight" HorizontalAlignment="Left" Height="25" Margin="126,143,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="245" Grid.Column="1"/>
+        <Label Content="Width" HorizontalAlignment="Left" Height="35" Margin="0,70,0,0" VerticalAlignment="Top" Width="126" Grid.Column="1"/>
+        <Label Content="Height" HorizontalAlignment="Left" Height="35" Margin="0,143,0,0" VerticalAlignment="Top" Width="126" Grid.Column="1"/>
+        <Grid Margin="126,197,332,53" Grid.Column="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="214*"/>
+                <ColumnDefinition Width="53*"/>
+            </Grid.ColumnDefinitions>
+            <CheckBox x:Name="chkboxMultimon" Content="_Multi Monitor" HorizontalAlignment="Left" Height="28" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxSpan" Content="_Span" HorizontalAlignment="Left" Height="28" Margin="0,29,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxAdmin" Content="_Admin" HorizontalAlignment="Left" Height="28" Margin="0,57,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxPublic" Content="_Public" HorizontalAlignment="Left" Height="28" Margin="0,85,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxRemoteGuard" Content="Remote _Guard" HorizontalAlignment="Left" Height="28" Margin="0,113,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+            <CheckBox x:Name="chkboxRestrictedAdmin" Content="_Restricted Admin" HorizontalAlignment="Left" Height="28" Margin="0,141,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
+
+        </Grid>
+        <Button x:Name="btnConnect" Grid.ColumnSpan="2" Content="Connect" HorizontalAlignment="Left" Height="43" Margin="41,366,0,0" VerticalAlignment="Top" Width="134" IsDefault="True"/>
+        <Button x:Name="btnCancel" Content="Cancel" HorizontalAlignment="Left" Height="43" Margin="286,366,0,0" VerticalAlignment="Top" Width="134" Grid.Column="1" IsCancel="True"/>
+
+    </Grid>
+</Window>
+'@
+#>
 
 [string]$runScriptXAML = @'
 <Window x:Class="VMWare_GUI.Run_Script"
@@ -508,8 +557,8 @@ $pinvokeCode = @'
         Title="Screenshot" Height="700" Width="950">
     <Grid>
         <Image x:Name="imgScreenshot" Margin="20,20,20,83"/>
-        <Button x:Name="btnDeleteScreenShot" Content="_Delete Snapshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Top" Width="187"/>
-        <Button x:Name="btnScreenShotToClipboard" Content="_Copy To Clipboard" HorizontalAlignment="Left" Height="45" Margin="236,603,0,0" VerticalAlignment="Top" Width="187"/>
+        <Button x:Name="btnDeleteScreenShot" Content="_Delete Snapshot" HorizontalAlignment="Left" Height="45" Margin="20,603,0,0" VerticalAlignment="Bottom" Width="187"/>
+        <Button x:Name="btnScreenShotToClipboard" Content="_Copy To Clipboard" HorizontalAlignment="Left" Height="45" Margin="236,603,0,0" VerticalAlignment="Bottom" Width="187"/>
 
     </Grid>
 </Window>
@@ -742,7 +791,7 @@ Function Refresh-Form
     $getError = $null
     try
     {
-        $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -ErrorVariable getError -Name ($(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName })) | VMware.VimAutomation.Core\Get-Snapshot )
+        $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -ErrorVariable getError -Name ($(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName })) | VMware.VimAutomation.Core\Get-Snapshot -verbose:$false)
     }
     catch
     {
@@ -760,7 +809,7 @@ Function Refresh-Form
         {
             if( $connection = Connect-VIServer @connectParameters )
             {
-                $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -Name ($(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName })) | VMware.VimAutomation.Core\Get-Snapshot )
+                $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -Name ($(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName })) | VMware.VimAutomation.Core\Get-Snapshot -verbose:$false)
             }
             else
             {
@@ -1164,7 +1213,7 @@ Function Process-Snapshot
             {
                 return
             }
-            if( $snapshot = Get-Snapshot -Id $tag -VM $vm )
+            if( $snapshot = Get-Snapshot -Id $tag -VM $vm -verbose:$false)
             {
                 [string]$details = "Name = $($snapshot.Name)`n`rDescription = $($snapshot.Description)`n`rCreated = $(Get-Date -Date $snapshot.Created -Format G)`n`rSize = $([math]::Round( $snapshot.SizeGB , 2 ))GB`n`rPower State = $($snapshot.PowerState)`n`rQuiesced = $(if( $snapshot.Quiesced ) { 'Yes' } else {'No' })"
                 [void][Windows.MessageBox]::Show( $details , 'Snapshot Details' , 'Ok' ,'Information' )
@@ -1186,7 +1235,7 @@ Function Process-Snapshot
         {
             if( $Operation -eq 'LatestSnapshotRevert' )
             {
-                if( ! ( $snapshot = Get-Snapshot -VM $vm|Sort-Object -Property Created -Descending|Select-Object -First 1 ))
+                if( ! ( $snapshot = Get-Snapshot -VM $vm -verbose:$false | Sort-Object -Property Created -Descending|Select-Object -First 1 ))
                 {
                     [Windows.MessageBox]::Show( "No snapshots found for $($vm.Name)" , 'Snapshot Revert Error' , 'OK' ,'Error' )
                     return
@@ -1194,7 +1243,7 @@ Function Process-Snapshot
             }
             else
             {
-                $snapshot = Get-Snapshot -Id $GUIobject.SelectedItem.Tag -VM $vm
+                $snapshot = Get-Snapshot -Id $GUIobject.SelectedItem.Tag -VM $vm -verbose:$false
             }
             if( $snapshot )
             {
@@ -1343,7 +1392,7 @@ Function Show-SnapShotWindow
         $vm
     )
 
-    [array]$theseSnapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vm -ErrorAction SilentlyContinue )
+    [array]$theseSnapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vm -ErrorAction SilentlyContinue -verbose:$false)
     if( ! $theseSnapshots -or ! $theseSnapshots.Count )
     {
         [void][Windows.MessageBox]::Show( "No snapshots found for $($vm.name)" , 'Snapshot Management' , 'Ok' ,'Warning' )
@@ -2027,7 +2076,6 @@ Function New-VirtualMachine
             $newVMForm.Title = "$operation $($vm.Name)"
         }
 
-
         Get-Datastore | Sort-Object -Property Name | ForEach-Object `
         {
             $WPFcomboboxDatastore.Items.Add( "$($_.Name) ($($_.FreeSpaceGB -as [int]) GB free)" )
@@ -2041,7 +2089,7 @@ Function New-VirtualMachine
             if( $_.ParentId -notmatch '^Folder' )
             {
                 ## Change the root from 'vm' to '' as parentId will not be Folder-Group-*
-                $_.PSObject.properties.remove('Name')
+                $_.PSObject.properties.remove( 'Name' )
                 Add-Member -InputObject $_ -MemberType NoteProperty -Name Name -Value '' -Force
             }
             $folderIdToName.Add( $_.Id , $_ )
@@ -2087,14 +2135,19 @@ Function New-VirtualMachine
         $WPFbtnNewVMOK.Add_Click({
             $_.Handled = $true
             [bool]$proceed = $false 
+            [string]$newVMName = $null
 
-            if( $operation -eq 'new' -and [string]::IsNullOrEmpty( $WPFtextboxNewVMName.Text.Trim() ) )
+            if( $operation -eq 'new' -and [string]::IsNullOrEmpty( ( $newVMName = $WPFtextboxNewVMName.Text.Trim() ) ) )
             {
                 [void][Windows.MessageBox]::Show( "Must enter a name for the new VM" , 'New VM Error' , 'Ok' ,'Error' )
             }
-            elseif( $operation -eq 'new' -and ( Get-VM -Name $WPFtextboxNewVMName.Text.Trim() -ErrorAction SilentlyContinue ) )
+            elseif( $operation -eq 'new' -and ( Get-VM -Name $newVMName -ErrorAction SilentlyContinue ) )
             {
-                [void][Windows.MessageBox]::Show( "VM `"$($WPFtextboxNewVMName.Text)`" already exists" , 'New VM Error' , 'Ok' ,'Error' )
+                [void][Windows.MessageBox]::Show( "VM `"$newVMName`" already exists" , 'New VM Error' , 'Ok' ,'Error' )
+            }
+            elseif( $operation -eq 'new' -and $newVMName.Length -ge 16 -and [Windows.MessageBox]::Show( "`"$newVMName`" length is $($newVMName.Length) which could cause issues as a NetBIOS name. Continue ?" , 'New VM Warning' , 'YesNo' ,'Warning' ) -ine 'yes' )
+            {
+                ## Already prompted
             }
             elseif( $operation -eq 'new' -and ! $WPFcomboboxTemplate.SelectedItem )
             {
@@ -2179,7 +2232,8 @@ Function New-VirtualMachine
             }
             if( $WPFcomboboxDatastore.SelectedItem )
             {
-                if( $datastore = Get-Datastore -Name $WPFcomboboxDatastore.SelectedItem )
+                ## we added the free space to the menu item so we must strip it off to get the original datastore name
+                if( $datastore = Get-Datastore -Name ( $WPFcomboboxDatastore.SelectedItem -replace ' \(\d+ GB free\)' ))
                 {
                     $newVMparameters.Add( 'Datastore' , $datastore )
                 }
@@ -2858,6 +2912,32 @@ Function Process-Action
                                     $_.Handled = $true
                                     $mstscForm.DialogResult = $true 
                                     $mstscForm.Close() })
+
+                                ## get display info so we can show resolutions to help custom choice
+                                
+                                $Screens = [system.windows.forms.screen]::AllScreens            
+                                
+                                $wpfDatagridDisplays.Clear()
+
+                                $datatable = New-Object -TypeName System.Data.DataTable
+
+                                [void]$datatable.Columns.Add( 'Primary' , ( 'string' -as [type] ) )
+                                [void]$datatable.Columns.Add( 'Width' , ( 'int' -as [type] ) )
+                                [void]$datatable.Columns.Add( 'Height' , ( 'int' -as [type] ) )
+                                [void]$datatable.Columns.Add( 'X' ,    ( 'int' -as [type] ) )
+                                [void]$datatable.Columns.Add( 'Y' ,   ( 'int' -as [type] ) )
+
+                                foreach ($screen in $screens)
+                                {                                    
+                                    [void]$datatable.Rows.Add( $screen.Primary , $screen.Bounds.Width , $screen.Bounds.Height , $screen.WorkingArea.X , $screen.WorkingArea.Y )
+                                }
+
+                                ## TODO autosize datagrid to columns
+
+                                $wpfDatagridDisplays.ItemsSource = $datatable.DefaultView
+                                $wpfDatagridDisplays.IsReadOnly = $true
+                                $wpfDatagridDisplays.CanUserSortColumns = $false
+
                                 if( $mstscForm.ShowDialog() )
                                 {
                                     if( ![string]::IsNullOrEmpty( $WPFtxtboxMstscWidth.Text ) )
@@ -3735,14 +3815,13 @@ if( ! $alreadyConnected )
 }
 
 [string[]]$rdpCredential = $null
-[string]$rdpusername = $null
 
 ## Write to an rdp file so we can pass to mstsc in case on non-domain joined device or if using different credentials
 [string]$theUser = $null
 if( ($theUser = ($credential | Select-Object -ExpandProperty UserName -ErrorAction SilentlyContinue)) -or ($theUser = $username ))
 {
     Write-Verbose "Connecting as $theUser"
-    [string]$rdpusername = $theUser
+    $rdpusername = $theUser
     [string]$rdpdomain = $null
     if( $theUser.IndexOf( '@' ) -lt 0 )
     {
@@ -3790,7 +3869,7 @@ if( ! $ipV6 )
     $addressPattern = '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
 }
 
-Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase,System.Windows.Forms
+Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase,System.Windows.Forms,System.Drawing
 
 $mainForm = New-Form -inputXaml $mainwindowXAML
 
@@ -3799,7 +3878,7 @@ if( ! $mainForm )
     return
 }
 
-[array]$snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName -ErrorVariable getError )
+[array]$snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName -ErrorVariable getError -verbose:$false )
 
 if( ($getError|Select-Object -expandproperty Exception | Select-Object -ExpandProperty Message -First 1) -match 'Not Connected'  )
 {
@@ -3807,7 +3886,7 @@ if( ($getError|Select-Object -expandproperty Exception | Select-Object -ExpandPr
     $connectParameters|Out-String|Write-Verbose
     if( $connection = Connect-VIServer @connectParameters )
     {
-        $snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName )
+        $snapshots = @( VMware.VimAutomation.Core\Get-Snapshot -VM $vmName -verbose:$false )
     }
 }
 
@@ -3909,7 +3988,7 @@ $WPFbtnFilter.Add_Click({
         $script:showSuspended = $wpfchkSuspended.IsChecked
         $script:vmName = $WPFtxtVMName.Text
         $getError = $null
-        $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -ErrorVariable getError -Name $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }) | VMware.VimAutomation.Core\Get-Snapshot )
+        $script:snapshots = @( VMware.VimAutomation.Core\Get-VM -ErrorVariable getError -Name $(if( [string]::IsNullOrEmpty( $script:vmName ) ) { '*' } else { $script:vmName }) | VMware.VimAutomation.Core\Get-Snapshot -verbose:$false )
         if( $getError -and $getError.Count -and $getError[0].Exception.Message -match 'Not Connected' )
         {
             if( ! ( $connection = Connect-VIServer @connectParameters ) )
@@ -4089,10 +4168,10 @@ if( ! $alreadyConnected -and $connection )
 }
 
 # SIG # Begin signature block
-# MIId5QYJKoZIhvcNAQcCoIId1jCCHdICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
+# MIIjcAYJKoZIhvcNAQcCoIIjYTCCI10CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUVaPh3b357TYeacpTqQlrZ3gL
-# 9WygghgDMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUd+iBYHk/Ar0yPtREUN5gUlHR
+# TOaggh2OMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -4148,105 +4227,135 @@ if( ! $alreadyConnected -and $connection )
 # 4oacz8sBhhOXrYeUOU4sTHSPQjd3lpyhhZGNd3COvc2csk55JG/h2hR2fK+m4p7z
 # sszK+vfqEX9Ab/7gYMgSo65hhFMSWcvtNO325mAxHJYJ1k9XEUTmq828ZmfEeyMq
 # K9FlN5ykYJMWp/vK8w4c6WXbYCBXWL43jnPyKT4tpiOjWOI6g18JMdUxCG41Hawp
-# hH44QHzE1NPeC+1UjTCCBq4wggSWoAMCAQICEAc2N7ckVHzYR6z9KGYqXlswDQYJ
-# KoZIhvcNAQELBQAwYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IElu
-# YzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQg
-# VHJ1c3RlZCBSb290IEc0MB4XDTIyMDMyMzAwMDAwMFoXDTM3MDMyMjIzNTk1OVow
-# YzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYDVQQD
-# EzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hBMjU2IFRpbWVTdGFtcGlu
-# ZyBDQTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAMaGNQZJs8E9cklR
-# VcclA8TykTepl1Gh1tKD0Z5Mom2gsMyD+Vr2EaFEFUJfpIjzaPp985yJC3+dH54P
-# Mx9QEwsmc5Zt+FeoAn39Q7SE2hHxc7Gz7iuAhIoiGN/r2j3EF3+rGSs+QtxnjupR
-# PfDWVtTnKC3r07G1decfBmWNlCnT2exp39mQh0YAe9tEQYncfGpXevA3eZ9drMvo
-# hGS0UvJ2R/dhgxndX7RUCyFobjchu0CsX7LeSn3O9TkSZ+8OpWNs5KbFHc02DVzV
-# 5huowWR0QKfAcsW6Th+xtVhNef7Xj3OTrCw54qVI1vCwMROpVymWJy71h6aPTnYV
-# VSZwmCZ/oBpHIEPjQ2OAe3VuJyWQmDo4EbP29p7mO1vsgd4iFNmCKseSv6De4z6i
-# c/rnH1pslPJSlRErWHRAKKtzQ87fSqEcazjFKfPKqpZzQmiftkaznTqj1QPgv/Ci
-# PMpC3BhIfxQ0z9JMq++bPf4OuGQq+nUoJEHtQr8FnGZJUlD0UfM2SU2LINIsVzV5
-# K6jzRWC8I41Y99xh3pP+OcD5sjClTNfpmEpYPtMDiP6zj9NeS3YSUZPJjAw7W4oi
-# qMEmCPkUEBIDfV8ju2TjY+Cm4T72wnSyPx4JduyrXUZ14mCjWAkBKAAOhFTuzuld
-# yF4wEr1GnrXTdrnSDmuZDNIztM2xAgMBAAGjggFdMIIBWTASBgNVHRMBAf8ECDAG
-# AQH/AgEAMB0GA1UdDgQWBBS6FtltTYUvcyl2mi91jGogj57IbzAfBgNVHSMEGDAW
-# gBTs1+OC0nFdZEzfLmc/57qYrhwPTzAOBgNVHQ8BAf8EBAMCAYYwEwYDVR0lBAww
-# CgYIKwYBBQUHAwgwdwYIKwYBBQUHAQEEazBpMCQGCCsGAQUFBzABhhhodHRwOi8v
-# b2NzcC5kaWdpY2VydC5jb20wQQYIKwYBBQUHMAKGNWh0dHA6Ly9jYWNlcnRzLmRp
-# Z2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3J0MEMGA1UdHwQ8MDow
-# OKA2oDSGMmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRS
-# b290RzQuY3JsMCAGA1UdIAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwHATANBgkq
-# hkiG9w0BAQsFAAOCAgEAfVmOwJO2b5ipRCIBfmbW2CFC4bAYLhBNE88wU86/GPvH
-# UF3iSyn7cIoNqilp/GnBzx0H6T5gyNgL5Vxb122H+oQgJTQxZ822EpZvxFBMYh0M
-# CIKoFr2pVs8Vc40BIiXOlWk/R3f7cnQU1/+rT4osequFzUNf7WC2qk+RZp4snuCK
-# rOX9jLxkJodskr2dfNBwCnzvqLx1T7pa96kQsl3p/yhUifDVinF2ZdrM8HKjI/rA
-# J4JErpknG6skHibBt94q6/aesXmZgaNWhqsKRcnfxI2g55j7+6adcq/Ex8HBanHZ
-# xhOACcS2n82HhyS7T6NJuXdmkfFynOlLAlKnN36TU6w7HQhJD5TNOXrd/yVjmScs
-# PT9rp/Fmw0HNT7ZAmyEhQNC3EyTN3B14OuSereU0cZLXJmvkOHOrpgFPvT87eK1M
-# rfvElXvtCl8zOYdBeHo46Zzh3SP9HSjTx/no8Zhf+yvYfvJGnXUsHicsJttvFXse
-# GYs2uJPU5vIXmVnKcPA3v5gA3yAWTyf7YGcWoWa63VXAOimGsJigK+2VQbc61RWY
-# MbRiCQ8KvYHZE/6/pNHzV9m8BPqC3jLfBInwAM1dwvnQI38AC+R2AibZ8GV2QqYp
-# hwlHK+Z/GqSFD/yYlvZVVCsfgPrA8g4r5db7qS9EFUrnEw4d2zc4GqEr9u3WfPww
-# ggbGMIIErqADAgECAhAKekqInsmZQpAGYzhNhpedMA0GCSqGSIb3DQEBCwUAMGMx
-# CzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UEAxMy
-# RGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBpbmcg
-# Q0EwHhcNMjIwMzI5MDAwMDAwWhcNMzMwMzE0MjM1OTU5WjBMMQswCQYDVQQGEwJV
-# UzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xJDAiBgNVBAMTG0RpZ2lDZXJ0IFRp
-# bWVzdGFtcCAyMDIyIC0gMjCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIB
-# ALkqliOmXLxf1knwFYIY9DPuzFxs4+AlLtIx5DxArvurxON4XX5cNur1JY1Do4Hr
-# OGP5PIhp3jzSMFENMQe6Rm7po0tI6IlBfw2y1vmE8Zg+C78KhBJxbKFiJgHTzsNs
-# /aw7ftwqHKm9MMYW2Nq867Lxg9GfzQnFuUFqRUIjQVr4YNNlLD5+Xr2Wp/D8sfT0
-# KM9CeR87x5MHaGjlRDRSXw9Q3tRZLER0wDJHGVvimC6P0Mo//8ZnzzyTlU6E6XYY
-# mJkRFMUrDKAz200kheiClOEvA+5/hQLJhuHVGBS3BEXz4Di9or16cZjsFef9LuzS
-# mwCKrB2NO4Bo/tBZmCbO4O2ufyguwp7gC0vICNEyu4P6IzzZ/9KMu/dDI9/nw1oF
-# Yn5wLOUrsj1j6siugSBrQ4nIfl+wGt0ZvZ90QQqvuY4J03ShL7BUdsGQT5TshmH/
-# 2xEvkgMwzjC3iw9dRLNDHSNQzZHXL537/M2xwafEDsTvQD4ZOgLUMalpoEn5deGb
-# 6GjkagyP6+SxIXuGZ1h+fx/oK+QUshbWgaHK2jCQa+5vdcCwNiayCDv/vb5/bBMY
-# 38ZtpHlJrYt/YYcFaPfUcONCleieu5tLsuK2QT3nr6caKMmtYbCgQRgZTu1Hm2GV
-# 7T4LYVrqPnqYklHNP8lE54CLKUJy93my3YTqJ+7+fXprAgMBAAGjggGLMIIBhzAO
-# BgNVHQ8BAf8EBAMCB4AwDAYDVR0TAQH/BAIwADAWBgNVHSUBAf8EDDAKBggrBgEF
-# BQcDCDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1sBwEwHwYDVR0jBBgw
-# FoAUuhbZbU2FL3MpdpovdYxqII+eyG8wHQYDVR0OBBYEFI1kt4kh/lZYRIRhp+pv
-# HDaP3a8NMFoGA1UdHwRTMFEwT6BNoEuGSWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNv
-# bS9EaWdpQ2VydFRydXN0ZWRHNFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5j
-# cmwwgZAGCCsGAQUFBwEBBIGDMIGAMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5k
-# aWdpY2VydC5jb20wWAYIKwYBBQUHMAKGTGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0
-# LmNvbS9EaWdpQ2VydFRydXN0ZWRHNFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdD
-# QS5jcnQwDQYJKoZIhvcNAQELBQADggIBAA0tI3Sm0fX46kuZPwHk9gzkrxad2bOM
-# l4IpnENvAS2rOLVwEb+EGYs/XeWGT76TOt4qOVo5TtiEWaW8G5iq6Gzv0UhpGThb
-# z4k5HXBw2U7fIyJs1d/2WcuhwupMdsqh3KErlribVakaa33R9QIJT4LWpXOIxJiA
-# 3+5JlbezzMWn7g7h7x44ip/vEckxSli23zh8y/pc9+RTv24KfH7X3pjVKWWJD6Kc
-# wGX0ASJlx+pedKZbNZJQfPQXpodkTz5GiRZjIGvL8nvQNeNKcEiptucdYL0EIhUl
-# cAZyqUQ7aUcR0+7px6A+TxC5MDbk86ppCaiLfmSiZZQR+24y8fW7OK3NwJMR1TJ4
-# Sks3KkzzXNy2hcC7cDBVeNaY/lRtf3GpSBp43UZ3Lht6wDOK+EoojBKoc88t+dMj
-# 8p4Z4A2UKKDr2xpRoJWCjihrpM6ddt6pc6pIallDrl/q+A8GQp3fBmiW/iqgdFtj
-# Zt5rLLh4qk1wbfAs8QcVfjW05rUMopml1xVrNQ6F1uAszOAMJLh8UgsemXzvyMjF
-# jFhpr6s94c/MfRWuFL+Kcd/Kl7HYR+ocheBFThIcFClYzG/Tf8u+wQ5KbyCcrtlz
-# MlkI5y2SoRoR/jKYpl0rl+CL05zMbbUNrkdjOEcXW28T2moQbh9Jt0RbtAgKh1pZ
-# BHYRoad3AhMcMYIFTDCCBUgCAQEwgYYwcjELMAkGA1UEBhMCVVMxFTATBgNVBAoT
-# DERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTExMC8GA1UE
-# AxMoRGlnaUNlcnQgU0hBMiBBc3N1cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3j
-# qtvdtaueQfTZ1SF1TjAJBgUrDgMCGgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAA
-# oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUDtjEwI73m6A/HwZTVDKz3fmh
-# FDEwDQYJKoZIhvcNAQEBBQAEggEACVFGGflNr+Gugld6O5mZW+6AY8mx+v6D0vED
-# M2QAE2s0WXPT8PaQzMVubkbMrW8KcZQ36w9PCef+HepmEEFHTBMQJuUHOVVN4E51
-# w6TZ7Js3cZmElmlteGIVq6t+3h5FQZS0fSQu8drnoencIZi2nD63QNQVg08kasYQ
-# YDH4XofTnb7RiLoq+Ltu4QZ7JIemRyDI3bPBSRSS5RlVOxK0Ts7SuklRk9pkaqSx
-# O7+kXaAoaHH/qwdd1YgiVjzHOoksXEf8HlIL03dDlDP1Iqi6msGXWjmtlRs38UfO
-# DIqqzT1Tuj7HHeOiKS39VSJDJVX4QN8jR6NdldO9Hy6J7Gz/BaGCAyAwggMcBgkq
-# hkiG9w0BCQYxggMNMIIDCQIBATB3MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5E
-# aWdpQ2VydCwgSW5jLjE7MDkGA1UEAxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0
-# MDk2IFNIQTI1NiBUaW1lU3RhbXBpbmcgQ0ECEAp6SoieyZlCkAZjOE2Gl50wDQYJ
-# YIZIAWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3
-# DQEJBTEPFw0yMjA1MDMxNTQyMzlaMC8GCSqGSIb3DQEJBDEiBCAMO/uOkrdaRe7n
-# qX4doeGO5X6uUc09WZrB8c34EDfRUjANBgkqhkiG9w0BAQEFAASCAgBiD2Hqz2xR
-# Zfkl3P2qk+FYLT4q6enjzWTLlKpuqWAlSwPg9y+jrwGrNl13QGvZ2InVImQ4k8aI
-# ur2yFVRbdeqOcLsmACRLBCc4qgYwUm7YueuM7io6tzer9xYxjzEpV+XUuxSYhhpn
-# TPso+AtzcZJbCPidYgZduZ4+yNA/QtHPeYfg4x0oBVtvRH3EaleD/Q0Zmg/uvs1A
-# oGTvkuMHjw9YtGMOAVuHuDdC0NUOQA0fFNngpX/9RwL7eAQSc0IB6n6VAypxACqm
-# JKAQIoL5WDvwH1+/suM/li0YJIzdihf08htpge0ULIkSM3SL4wdwmErH9iKb2og6
-# /b5z4/w8NaElPtX8Ss3jZLTL/MmpAIKXi+fas0Sz6ObNyyDMXAe+HQGffgM8IPzc
-# DQP82+JFg5l0iVev5I8UrkPTYWYARSFemTt0Fh49BrUY2eHcDHWsu09cPf/NWS/I
-# FcsvzaE+U90vElVBBj8bixE0C9G3dqO+ZCYBdGgOvtf4ffnscnVj0nET/tcqt8hq
-# gggnU9IRwqpMWUwiOekoykokHfsAf1sYHVYyyHhHzezkDoiBt7XZUeCcIjfitmey
-# TLtQgRUDigNktWxNomDWrW8kjCpdC3Vw/n4E7rLrBuRQsDV6EWTZuJMtuHacrlNz
-# eCaaYpxB3mDnuI6bGY2A3JYGEjO53vGKpA==
+# hH44QHzE1NPeC+1UjTCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJ
+# KoZIhvcNAQEMBQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IElu
+# YzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQg
+# QXNzdXJlZCBJRCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1
+# OVowYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
+# CxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBS
+# b290IEc0MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAv+aQc2jeu+Rd
+# SjwwIjBpM+zCpyUuySE98orYWcLhKac9WKt2ms2uexuEDcQwH/MbpDgW61bGl20d
+# q7J58soR0uRf1gU8Ug9SH8aeFaV+vp+pVxZZVXKvaJNwwrK6dZlqczKU0RBEEC7f
+# gvMHhOZ0O21x4i0MG+4g1ckgHWMpLc7sXk7Ik/ghYZs06wXGXuxbGrzryc/NrDRA
+# X7F6Zu53yEioZldXn1RYjgwrt0+nMNlW7sp7XeOtyU9e5TXnMcvak17cjo+A2raR
+# mECQecN4x7axxLVqGDgDEI3Y1DekLgV9iPWCPhCRcKtVgkEy19sEcypukQF8IUzU
+# vK4bA3VdeGbZOjFEmjNAvwjXWkmkwuapoGfdpCe8oU85tRFYF/ckXEaPZPfBaYh2
+# mHY9WV1CdoeJl2l6SPDgohIbZpp0yt5LHucOY67m1O+SkjqePdwA5EUlibaaRBkr
+# fsCUtNJhbesz2cXfSwQAzH0clcOP9yGyshG3u3/y1YxwLEFgqrFjGESVGnZifvaA
+# sPvoZKYz0YkH4b235kOkGLimdwHhD5QMIR2yVCkliWzlDlJRR3S+Jqy2QXXeeqxf
+# jT/JvNNBERJb5RBQ6zHFynIWIgnffEx1P2PsIV/EIFFrb7GrhotPwtZFX50g/KEe
+# xcCPorF+CiaZ9eRpL5gdLfXZqbId5RsCAwEAAaOCATowggE2MA8GA1UdEwEB/wQF
+# MAMBAf8wHQYDVR0OBBYEFOzX44LScV1kTN8uZz/nupiuHA9PMB8GA1UdIwQYMBaA
+# FEXroq/0ksuCMS1Ri6enIZ3zbcgPMA4GA1UdDwEB/wQEAwIBhjB5BggrBgEFBQcB
+# AQRtMGswJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2ljZXJ0LmNvbTBDBggr
+# BgEFBQcwAoY3aHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNz
+# dXJlZElEUm9vdENBLmNydDBFBgNVHR8EPjA8MDqgOKA2hjRodHRwOi8vY3JsMy5k
+# aWdpY2VydC5jb20vRGlnaUNlcnRBc3N1cmVkSURSb290Q0EuY3JsMBEGA1UdIAQK
+# MAgwBgYEVR0gADANBgkqhkiG9w0BAQwFAAOCAQEAcKC/Q1xV5zhfoKN0Gz22Ftf3
+# v1cHvZqsoYcs7IVeqRq7IviHGmlUIu2kiHdtvRoU9BNKei8ttzjv9P+Aufih9/Jy
+# 3iS8UgPITtAq3votVs/59PesMHqai7Je1M/RQ0SbQyHrlnKhSLSZy51PpwYDE3cn
+# RNTnf+hZqPC/Lwum6fI0POz3A8eHqNJMQBk1RmppVLC4oVaO7KTVPeix3P0c2PR3
+# WlxUjG/voVA9/HYJaISfb8rbII01YBwCA8sgsKxYoA5AY8WYIsGyWfVVa88nq2x2
+# zm8jLfR+cWojayL/ErhULSd+2DrZ8LaHlv1b0VysGMNNn3O3AamfV6peKOK5lDCC
+# Bq4wggSWoAMCAQICEAc2N7ckVHzYR6z9KGYqXlswDQYJKoZIhvcNAQELBQAwYjEL
+# MAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3
+# LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290IEc0
+# MB4XDTIyMDMyMzAwMDAwMFoXDTM3MDMyMjIzNTk1OVowYzELMAkGA1UEBhMCVVMx
+# FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVz
+# dGVkIEc0IFJTQTQwOTYgU0hBMjU2IFRpbWVTdGFtcGluZyBDQTCCAiIwDQYJKoZI
+# hvcNAQEBBQADggIPADCCAgoCggIBAMaGNQZJs8E9cklRVcclA8TykTepl1Gh1tKD
+# 0Z5Mom2gsMyD+Vr2EaFEFUJfpIjzaPp985yJC3+dH54PMx9QEwsmc5Zt+FeoAn39
+# Q7SE2hHxc7Gz7iuAhIoiGN/r2j3EF3+rGSs+QtxnjupRPfDWVtTnKC3r07G1decf
+# BmWNlCnT2exp39mQh0YAe9tEQYncfGpXevA3eZ9drMvohGS0UvJ2R/dhgxndX7RU
+# CyFobjchu0CsX7LeSn3O9TkSZ+8OpWNs5KbFHc02DVzV5huowWR0QKfAcsW6Th+x
+# tVhNef7Xj3OTrCw54qVI1vCwMROpVymWJy71h6aPTnYVVSZwmCZ/oBpHIEPjQ2OA
+# e3VuJyWQmDo4EbP29p7mO1vsgd4iFNmCKseSv6De4z6ic/rnH1pslPJSlRErWHRA
+# KKtzQ87fSqEcazjFKfPKqpZzQmiftkaznTqj1QPgv/CiPMpC3BhIfxQ0z9JMq++b
+# Pf4OuGQq+nUoJEHtQr8FnGZJUlD0UfM2SU2LINIsVzV5K6jzRWC8I41Y99xh3pP+
+# OcD5sjClTNfpmEpYPtMDiP6zj9NeS3YSUZPJjAw7W4oiqMEmCPkUEBIDfV8ju2Tj
+# Y+Cm4T72wnSyPx4JduyrXUZ14mCjWAkBKAAOhFTuzuldyF4wEr1GnrXTdrnSDmuZ
+# DNIztM2xAgMBAAGjggFdMIIBWTASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQW
+# BBS6FtltTYUvcyl2mi91jGogj57IbzAfBgNVHSMEGDAWgBTs1+OC0nFdZEzfLmc/
+# 57qYrhwPTzAOBgNVHQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwgwdwYI
+# KwYBBQUHAQEEazBpMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5j
+# b20wQQYIKwYBBQUHMAKGNWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdp
+# Q2VydFRydXN0ZWRSb290RzQuY3J0MEMGA1UdHwQ8MDowOKA2oDSGMmh0dHA6Ly9j
+# cmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3JsMCAGA1Ud
+# IAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwHATANBgkqhkiG9w0BAQsFAAOCAgEA
+# fVmOwJO2b5ipRCIBfmbW2CFC4bAYLhBNE88wU86/GPvHUF3iSyn7cIoNqilp/GnB
+# zx0H6T5gyNgL5Vxb122H+oQgJTQxZ822EpZvxFBMYh0MCIKoFr2pVs8Vc40BIiXO
+# lWk/R3f7cnQU1/+rT4osequFzUNf7WC2qk+RZp4snuCKrOX9jLxkJodskr2dfNBw
+# CnzvqLx1T7pa96kQsl3p/yhUifDVinF2ZdrM8HKjI/rAJ4JErpknG6skHibBt94q
+# 6/aesXmZgaNWhqsKRcnfxI2g55j7+6adcq/Ex8HBanHZxhOACcS2n82HhyS7T6NJ
+# uXdmkfFynOlLAlKnN36TU6w7HQhJD5TNOXrd/yVjmScsPT9rp/Fmw0HNT7ZAmyEh
+# QNC3EyTN3B14OuSereU0cZLXJmvkOHOrpgFPvT87eK1MrfvElXvtCl8zOYdBeHo4
+# 6Zzh3SP9HSjTx/no8Zhf+yvYfvJGnXUsHicsJttvFXseGYs2uJPU5vIXmVnKcPA3
+# v5gA3yAWTyf7YGcWoWa63VXAOimGsJigK+2VQbc61RWYMbRiCQ8KvYHZE/6/pNHz
+# V9m8BPqC3jLfBInwAM1dwvnQI38AC+R2AibZ8GV2QqYphwlHK+Z/GqSFD/yYlvZV
+# VCsfgPrA8g4r5db7qS9EFUrnEw4d2zc4GqEr9u3WfPwwggbAMIIEqKADAgECAhAM
+# TWlyS5T6PCpKPSkHgD1aMA0GCSqGSIb3DQEBCwUAMGMxCzAJBgNVBAYTAlVTMRcw
+# FQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UEAxMyRGlnaUNlcnQgVHJ1c3Rl
+# ZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBpbmcgQ0EwHhcNMjIwOTIxMDAw
+# MDAwWhcNMzMxMTIxMjM1OTU5WjBGMQswCQYDVQQGEwJVUzERMA8GA1UEChMIRGln
+# aUNlcnQxJDAiBgNVBAMTG0RpZ2lDZXJ0IFRpbWVzdGFtcCAyMDIyIC0gMjCCAiIw
+# DQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAM/spSY6xqnya7uNwQ2a26HoFIV0
+# MxomrNAcVR4eNm28klUMYfSdCXc9FZYIL2tkpP0GgxbXkZI4HDEClvtysZc6Va8z
+# 7GGK6aYo25BjXL2JU+A6LYyHQq4mpOS7eHi5ehbhVsbAumRTuyoW51BIu4hpDIjG
+# 8b7gL307scpTjUCDHufLckkoHkyAHoVW54Xt8mG8qjoHffarbuVm3eJc9S/tjdRN
+# lYRo44DLannR0hCRRinrPibytIzNTLlmyLuqUDgN5YyUXRlav/V7QG5vFqianJVH
+# hoV5PgxeZowaCiS+nKrSnLb3T254xCg/oxwPUAY3ugjZNaa1Htp4WB056PhMkRCW
+# fk3h3cKtpX74LRsf7CtGGKMZ9jn39cFPcS6JAxGiS7uYv/pP5Hs27wZE5FX/Nurl
+# fDHn88JSxOYWe1p+pSVz28BqmSEtY+VZ9U0vkB8nt9KrFOU4ZodRCGv7U0M50GT6
+# Vs/g9ArmFG1keLuY/ZTDcyHzL8IuINeBrNPxB9ThvdldS24xlCmL5kGkZZTAWOXl
+# LimQprdhZPrZIGwYUWC6poEPCSVT8b876asHDmoHOWIZydaFfxPZjXnPYsXs4Xu5
+# zGcTB5rBeO3GiMiwbjJ5xwtZg43G7vUsfHuOy2SJ8bHEuOdTXl9V0n0ZKVkDTvpd
+# 6kVzHIR+187i1Dp3AgMBAAGjggGLMIIBhzAOBgNVHQ8BAf8EBAMCB4AwDAYDVR0T
+# AQH/BAIwADAWBgNVHSUBAf8EDDAKBggrBgEFBQcDCDAgBgNVHSAEGTAXMAgGBmeB
+# DAEEAjALBglghkgBhv1sBwEwHwYDVR0jBBgwFoAUuhbZbU2FL3MpdpovdYxqII+e
+# yG8wHQYDVR0OBBYEFGKK3tBh/I8xFO2XC809KpQU31KcMFoGA1UdHwRTMFEwT6BN
+# oEuGSWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRHNFJT
+# QTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcmwwgZAGCCsGAQUFBwEBBIGDMIGA
+# MCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wWAYIKwYBBQUH
+# MAKGTGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRH
+# NFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcnQwDQYJKoZIhvcNAQELBQAD
+# ggIBAFWqKhrzRvN4Vzcw/HXjT9aFI/H8+ZU5myXm93KKmMN31GT8Ffs2wklRLHiI
+# Y1UJRjkA/GnUypsp+6M/wMkAmxMdsJiJ3HjyzXyFzVOdr2LiYWajFCpFh0qYQitQ
+# /Bu1nggwCfrkLdcJiXn5CeaIzn0buGqim8FTYAnoo7id160fHLjsmEHw9g6A++T/
+# 350Qp+sAul9Kjxo6UrTqvwlJFTU2WZoPVNKyG39+XgmtdlSKdG3K0gVnK3br/5iy
+# JpU4GYhEFOUKWaJr5yI+RCHSPxzAm+18SLLYkgyRTzxmlK9dAlPrnuKe5NMfhgFk
+# nADC6Vp0dQ094XmIvxwBl8kZI4DXNlpflhaxYwzGRkA7zl011Fk+Q5oYrsPJy8P7
+# mxNfarXH4PMFw1nfJ2Ir3kHJU7n/NBBn9iYymHv+XEKUgZSCnawKi8ZLFUrTmJBF
+# YDOA4CPe+AOk9kVH5c64A0JH6EE2cXet/aLol3ROLtoeHYxayB6a1cLwxiKoT5u9
+# 2ByaUcQvmvZfpyeXupYuhVfAYOd4Vn9q78KVmksRAsiCnMkaBXy6cbVOepls9Oie
+# 1FqYyJ+/jbsYXEP10Cro4mLueATbvdH7WwqocH7wl4R44wgDXUcsY6glOJcB0j86
+# 2uXl9uab3H4szP8XTE0AotjWAQ64i+7m4HJViSwnGWH2dwGMMYIFTDCCBUgCAQEw
+# gYYwcjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
+# CxMQd3d3LmRpZ2ljZXJ0LmNvbTExMC8GA1UEAxMoRGlnaUNlcnQgU0hBMiBBc3N1
+# cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
+# GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
+# KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
+# 9w0BCQQxFgQUl2OZfNzbIMEMORq1K0wA+wvYnPwwDQYJKoZIhvcNAQEBBQAEggEA
+# I6yA8eVxml2r6yE2H7cNmD+GM6JWTwLvKWHosaCqlFSgM0iP4lNd7+t8flM3Pf3b
+# buj9kWlfhSUYrjw1AItKb4Mw9cDRgQyV40ZTyNs/fAD9mGPupwJRYp52EBOdmujf
+# NAQFQ0RokXkF8dW0dm7iajFXnTsGWo2dOjZzX5x8ZvcaNRAzQKEJmCAcXZXlQbcd
+# XRMoNgjhL2tp7RapDuBdsT/odqK5NIaeVGkchDHWUfu2PBlrwgvucyZUYk9POCKR
+# QLn33bj4oDMmgsVfniH6Rn6aDtYDQY9Ab50EwejgWgok7tYe/XfzzjpmpDfcCsWv
+# K3UARlztWw4WlON/oX0bP6GCAyAwggMcBgkqhkiG9w0BCQYxggMNMIIDCQIBATB3
+# MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UE
+# AxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBp
+# bmcgQ0ECEAxNaXJLlPo8Kko9KQeAPVowDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG
+# 9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMjEwMDMwOTAxMzVa
+# MC8GCSqGSIb3DQEJBDEiBCBMmW526PQ04e+TFuRyu+lrMFP7eaD+l2NJ3yyk60x5
+# wzANBgkqhkiG9w0BAQEFAASCAgAxsiAniwubZ0JccH67ayM21YwHuWSq+jkyVr84
+# 6vxP+PLmi1CjCoRtX0s0lTt1X75fGMcX5TMoWhem5nHaDPZB5Kt+6woY2AmvacDa
+# deKVWQ7xlIP+ludvNlaQqwj2ii+B9NFVqIkl+RNu8sQtDEYAiy5hIBzqSIFUIbNp
+# TVpY4bymSaHP8brdS1CT6FNnb/d6qBfNWq2mbd/vYcUlWmbu8Ap2gxm/85gRWlgH
+# fSaGxVhmNcYp7RJNbhsPqv4MuRo8RGu0PXeVp+aHa+zbO/DckO4ibZ7TWyi1Zonh
+# q2uwEllYisZsLdA5znIF+WWNQtbGubV8evN5zJTHWeqk/ytZe4TPRtBoR45e1dpI
+# S2H4PBN8oBz47jEyls/Oe2DFE5dZJICJTGH6v+QQ/vTNNYCd8yQ89jbfZGYWW4+k
+# Zmhvb3ZNiiaMrC7RLR7eJa9IoNwXOBjaienbamtBwlJZKKS60VHZbQ5Pdi7ZcNH4
+# uObUspp/pA5QAhvF/71Bj6agF56jTbAJ4+41f0eziaQvQV59DGj+Ct05pjYEuAm6
+# hc4Iulqi9lzwRqcVwJHHctDXIyW/N11I/eHvhcIK/toh1QfRYu0YhwFo7Wp7TC2Z
+# JMCoRwmo1kpPAGdVcDokDjJd2Cxa2FUOZzgEo/0r+CDshfvlIjqanxDpb2QOsaaU
+# +cOWfQ==
 # SIG # End signature block
