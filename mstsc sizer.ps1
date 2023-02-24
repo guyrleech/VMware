@@ -117,7 +117,13 @@ drivestoredirect:s:$drivesToRedirect
                     <Label Content="Computer" HorizontalAlignment="Left" Height="38" Margin="14,132,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
                     <Button x:Name="btnLaunch" Content="_Launch" Grid.ColumnSpan="2" HorizontalAlignment="Left" Height="25" Margin="2,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="1"/>
                     <CheckBox x:Name="chkboxmsrdc" Grid.Column="4" Content="Use msrdc instead of mstsc" HorizontalAlignment="Left" Height="21" Margin="145,189,0,0" VerticalAlignment="Top" Width="292"/>
-                    <ComboBox x:Name="comboboxComputer" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,137,0,0" VerticalAlignment="Top" Width="254" IsEditable="True" IsDropDownOpen="False" Grid.ColumnSpan="3"/>
+                    <ComboBox x:Name="comboboxComputer" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,137,0,0" VerticalAlignment="Top" Width="254" IsEditable="True" IsDropDownOpen="False" Grid.ColumnSpan="3">
+                        <ComboBox.ContextMenu>
+                            <ContextMenu>
+                                 <MenuItem Header="Delete" x:Name="deleteComputersContextMenu"/>
+                            </ContextMenu>
+                        </ComboBox.ContextMenu>
+                    </ComboBox>
                     <CheckBox x:Name="chkboxPrimary" Grid.Column="4" Content="Use primary monitor" HorizontalAlignment="Left" Height="21" Margin="145,215,0,0" VerticalAlignment="Top" Width="292"/>
                     <TextBox x:Name="txtboxDrivesToRedirect" Grid.Column="2" HorizontalAlignment="Left" Height="26" Margin="14,230,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="254" Text="*" Grid.ColumnSpan="3"/>
                     <Label Content="Drive&#xA;Redirection" HorizontalAlignment="Left" Height="46" Margin="14,220,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
@@ -1332,6 +1338,29 @@ Function Start-RemoteVMwareSession
         [void][Windows.MessageBox]::Show( "No VM selected" , 'VMware Error' , 'Ok' ,'Error' )
     }
     }
+    
+Function Process-Action
+{
+    Param
+    (
+        $GUIobject , 
+        [string]$Operation ,
+        $context  ,
+        $thisObject
+    )
+
+    $_.Handled = $true
+    ## get selected item from control
+    if( $GUIobject )
+    {
+        [int]$selection = $GUIobject.selectedIndex
+        if( $selection -ge 0 )
+        {
+            Write-Verbose -Message "Deleting computer $($GUIobject.SelectedItem)"
+            $GUIobject.Items.RemoveAt( $selection )
+        }
+    }
+}
 
 #endregion pre-main
 
@@ -1688,6 +1717,8 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             $WPFtxtBoxOtherOptions.Text = $rdpoptions
         }
         
+        $WPFdeleteComputersContextMenu.Add_Click( { Process-Action -GUIobject $WPFcomboboxComputer -Operation 'DeleteComputer' -Context $_  -thisObject $this } )
+
         $mainWindow.add_KeyDown({
             Param
             (
@@ -1748,8 +1779,8 @@ New-RemoteSession -rethrow
 # SIG # Begin signature block
 # MIIjcAYJKoZIhvcNAQcCoIIjYTCCI10CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUzQ6rnC97V23dNdhUhkKEvY+t
-# jMyggh2OMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUg5+bTrUwZMC4KL93YFBLH9YR
+# gSaggh2OMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -1912,28 +1943,28 @@ New-RemoteSession -rethrow
 # cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
 # GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQUwjzHvXhKrkZ+9FihQPsw5gKBsDgwDQYJKoZIhvcNAQEBBQAEggEA
-# UNDxcpmGsRhp8VheSU9nmQ2hDPSOFfdAJ9EU2qNhUCezkL3fOml28YF22qC5sEk8
-# E+00+w+GQ+DVxPXYfH4ZkaxossZ6W+8wEJNjuxc00I1yGmIiFOqjxKM5nnSRWFcd
-# PIF34BQU75fJkyKXeSh9Myazs9eHZ5OyvEAcfplm9VNqqxcrsp5omJQD/e9YYQSc
-# dtw7ydCjVf0uoLcEzEVsC9ZFb5VWtlHPRdJs1V9hKxJoeUYxLy2A9zqjkorCTuXV
-# xEmkgBbSKF25q1PClH7mabh/G9Q308IhHE4ovNx9QG+Sk5bpwNvxnY9nU3XIOcde
-# x0H2GuNFDDuE6HdX7Dr/YKGCAyAwggMcBgkqhkiG9w0BCQYxggMNMIIDCQIBATB3
+# 9w0BCQQxFgQUaCwktYV6stXM+spISF8+s6VbRIQwDQYJKoZIhvcNAQEBBQAEggEA
+# qVVe1MeAC/wcudk2QChLMHclKDmMn0qDHzGy/sGYNy7DMl/um54BwOQszrOZPv+1
+# cNpSRsta4TUixb6ySnp8Kr5p6ueuHyiiKBGZMd2MGYu5aJMuhQ90zmDnFtLtqYMY
+# vuMYihNivQ4q5a54oc6Acli84IF3Mvh3J/y1T2K+YAo/QD0CE9GeYI6Y39822e4w
+# MHHnEWiXqWjZH4AN2TC1suPP6H6zeQkJuGGh/QodCg6/371huX2cgLoOSVnPAZt6
+# /R5pW5KvyVvR/iwKzzrB5o8gJk4vJEW648dSvYvMNf8bga1CsNr/1ZPwx8Sfdu34
+# 1VkWoeAIEwaq0OLQ11ZdCqGCAyAwggMcBgkqhkiG9w0BCQYxggMNMIIDCQIBATB3
 # MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UE
 # AxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBp
 # bmcgQ0ECEAxNaXJLlPo8Kko9KQeAPVowDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG
-# 9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMzAyMjQxMDE1MDda
-# MC8GCSqGSIb3DQEJBDEiBCC09JJUrP89tNsSwcZ4WSAkTZ4Z6ZqH6n6DAtKuIz10
-# dDANBgkqhkiG9w0BAQEFAASCAgCBaJ+QglIDOtcX68yTFYqTzxWyiqBRLQZpIgXT
-# ERDUoHTsSib5gd2FYZezkIGhMcOQ0z0wTt93z73dC9sd5lPOdOyB67pRaaHKjnJB
-# Nl0GtFxxqiyv6n3mCeARq8LFiHC+FyL1gnlze4R3DoyQlYTrnnhKEmN2CS+ViO1F
-# IebES0VphGAOptR93Fq0fPj/P6+7JIcDwU9VQhPGs3W+q4kj+u9whYf5g6w7lufG
-# wBjNggpyvfhtd25eXByHkSuBvX+ccM159r/6J92WfA8ZQ8DAJMIVwpRiaimHshVy
-# 9QJET9d62p7T8v+hY1bMSNnAVJsMDqSBtsVySPDEPjZv2axnVwG+qY2b22p+RiNg
-# wRv9UT5qf4VlqrvvgYRsUvAEaBPKM1zKMJ7IPZ36Fusr06FIAbmchsDKeTd4ZTiA
-# KP1rDxkm8Jl3rFxN+vNqr6Wh8RvrNC0lNTxfGbk4GlP/+qMkbvozPLGQoFqMZJOZ
-# fj2regtqC2ANEZ86KTM8PE7asVkaxdw+yLlo4JQiv7iJ8AlSWsbyApSPRxMwr1T4
-# mTqd1IEDV/aqZ1IFMrw3XIt5abPWI+KcCLk/VZUhA7Z1mjiPFUMx7uFkQnBb1Is6
-# mQyUGClXlYwNnMyz/oSa7lmLwP7ADvOmkuAQjabf/J7UrSQ5nEFDTL+nYvwWJH6H
-# uQlx6g==
+# 9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMzAyMjQxMTA1Mzda
+# MC8GCSqGSIb3DQEJBDEiBCB53ZoYfHQ+Zu6HgC2wgDvbhl/gYqfaG+xU8Ik71j7U
+# ADANBgkqhkiG9w0BAQEFAASCAgCgQjOx49BIS8iDz5FyyFZ7S9YXVpA6Ar4vVE9B
+# 3vb2xi8hmkkhKl7U8pdsEQfaqO59eZENktdPm0X+0Ncfy9ZcC5BuHIy1ZnP4mx7M
+# Yd6m1KryY/s0rNuUWJSQjgDaWnQgcJCd2DyjOiq/f5HjzPt97/uEXxh6GFgCp3oN
+# QTvdEksrLZq/cpPqGOlhOPbILicNZKZ1C+Y27x3GMvI9snuU5YbUuPO5AVZFota7
+# s/z50Q3BHoBI/ToiwO/lOrCddfNen2KOAMpcxqvacxsxwfiEYSpOrK8kS8wRv+Y3
+# QmGQlgykmMT9DXVxO5B5kKEcXtjuKjqilNgctDBGbKxjZ1Z+4mq11YIWx+fNCk91
+# /zFBdjCkpUCi4alahzCSSE1ksPz117oHFtpR3RqLZ17jCbhSNNAlvi7/0pKtBZYo
+# 9NOfPgsbqz0uz2SM3hNh+gObVtWvJ1MrvKem3ZLvZhlaJ7Gc3UQ+KXJWPCrmx23a
+# +0TNropreWXWX2aEfbkvsrAEJ7010IX+Dc7Lt2NpVWv/DCNxnds6zBVpn5H9SIIp
+# H2SdIBtPgi0vgfiNU6NjaIgKUEFFz5MVjGZ69c9SE0UR/tqio5/Bop3f8hWub6rw
+# aTmsfrgtHZ82cB64b0wi9wHdbShEoJNtkU+fQxNrxWboFt8lNhvoDjBcQ1o/+O8E
+# Dm16Vw==
 # SIG # End signature block
