@@ -25,13 +25,33 @@
     2022/12/19 @guyrleech  Added code to work for profile install of msrdc
     2023/02/21 @guyrleech  Persist computers list to HKCU
     2023/02/24 @guyrleech  Add VMware VMs to main computers list if connected to
+    2023/03/10 @guyrleech  Added looking for msrdc.exe in program files x86
+    2024/09/18 @guyrleech  Added Hyper-V support
+    2024/09/19 @guyrleech  Added Hyper-V console button
+    2024/09/23 @guyrleech  Added context menu for Hyper-V VMs
+    2024/10/04 @guyrleech  Added more Hyper-V context menu items
+                           Changed temp rdpfile naming & location
+                           Uses primary monitor if no monitor selected
+    2024/11/08 @guyrleech  Reverse name in .rdp file
+                           Fix window title
+    2024/11/12 @guyrleech  -remove added to remove characters from address for icon display differentiation improvement functionality
+                           Added Hyper-V Clear Filter button
+    2024/11/13 @guyrleech  Fixed not finding existing mstsc window
+    2024/12/10 @guyrleech  Added snapshot management dialog
+    2024/12/16 @guyrleech  Fixed VMware VM list not showing names
+    2025/02/24 @guyrleech  Fixed snapshot issues
+    2025/03/14 @guyrleech  Re-enable support for msrdc
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
-    ## TODO check for existing process and offer to bring that to front, kill or launch another although if msrdc will not work
+    ## TODO make hypervisor operations async with a watcher thread
+    ## TODO add history tab which is disabled by default (and thus audit)
+    ## TODO add VMware console to that tab, make mstsc.exe configurable so could use with other exes
+    ## TODO can we embed mstsx ax control so we can resize windows natively without mstsc.exe etc?
+
 #>
 
 <#
-Copyright © 2022 Guy Leech
+Copyright © 2025 Guy Leech
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, 
 including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -52,21 +72,31 @@ Param
     [string]$displayManufacturerCode ,
     [string]$username ,
     [string]$remoteDesktopName ,
+    [string]$hypervHost ,
     [switch]$primary ,
     [string]$percentage ,
     [switch]$usemsrdc ,
+    [switch]$noFriendlyName ,
     [switch]$noResize , ## use mstsc with no width/height parameters
     [string]$widthHeight , ## colon delimited
     [string]$xy , ## colon delimited
     [string]$drivesToRedirect = '*' ,
+    [string]$extraMsrdcParameters = '/SkipAvdSignatureChecks' ,
+    [string]$msrdcCopyPath ,
+    [string]$msrdcCopyFolder ,
+    [string]$msrdcCopyName = 'Copy of msrdc' ,
     [switch]$usegridviewpicker ,
     [switch]$fullScreen ,
+    [string]$youAreHereSnapshot = 'YouAreHere'  ,
     [switch]$showDisplays ,
     [switch]$showManufacturerCodes ,
     [switch]$useOtherOptions ,
     [switch]$noMove ,
-    [int]$windowWaitTimeSeconds = 60 ,
+    [switch]$reverse ,
+    [string]$remove , ## ^GL([AH]V)?[SW]\d+
+    [int]$windowWaitTimeSeconds = 20 ,
     [int]$pollForWindowEveryMilliseconds = 333 ,
+    [string]$tempFolder = $(Join-Path -Path $env:temp -ChildPath 'Guy Leech mstsc Sizer') ,
     [string]$exe = 'mstsc.exe' ,
     [string]$configKey = 'HKCU:\SOFTWARE\Guy Leech\mstsc wrapper'
 )
@@ -75,21 +105,102 @@ Param
 
 [array]$script:vms = $null
 $script:vmwareConnection = $null
+[array]$script:theseSnapshots = @()
 
 # keep user added comments so can set when displays change
 ##$script:itemscopy = New-Object -TypeName System.Collections.Generic.List[object]
 
 ## https://docs.microsoft.com/en-us/windows-server/remote/remote-desktop-services/clients/rdp-files
+## full address:s:$address ## removed since also using /v: so causes doubling of address in mstsc title bar
 [string]$rdpTemplate = @'
 desktopwidth:i:$width
 desktopheight:i:$height
 full address:s:$address
+window title:s:$address
 use multimon:i:0
 screen mode id:i:$screenmode
-dynamic resolution:i:2
+dynamic resolution:i:1
 smart sizing:i:0
 drivestoredirect:s:$drivesToRedirect
 '@
+
+<#  from ChatGPT after asking it to make it resize properly
+
+<Window x:Class="mstsc_msrdc_wrapper.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Guy's mstsc Wrapper Script" Height="500" Width="809">
+    <Grid>
+        <TabControl HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+            <TabItem Header="Main">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="10">
+                        <Label Content="Computer" VerticalAlignment="Center" />
+                        <ComboBox x:Name="comboboxComputer" Width="200" Margin="10,0,0,0" IsEditable="True" />
+                        <CheckBox x:Name="chkboxPrimary" Content="Use primary monitor" Margin="10,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="datagridDisplays" Grid.Row="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Margin="10" SelectionMode="Single" />
+
+                    <StackPanel Orientation="Horizontal" Grid.Row="2" HorizontalAlignment="Center" Margin="10">
+                        <Button x:Name="btnLaunch" Content="_Launch" Width="96" Margin="5" />
+                        <Button x:Name="btnRefresh" Content="_Refresh" Width="96" Margin="5" />
+                        <Button x:Name="btnCreateShortcut" Content="_Create Shortcut" Width="96" Margin="5" />
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Hyper-V">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Label Content="VMs" Grid.Row="0" HorizontalAlignment="Center" Margin="10" />
+
+                    <ListView x:Name="listViewHyperVVMs" Grid.Row="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Margin="10" SelectionMode="Multiple">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" />
+                                <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}" />
+                            </GridView>
+                        </ListView.View>
+                        <ListView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Power" x:Name="PowerContextMenu">
+                                    <MenuItem Header="Power On" x:Name="HyperVPowerOnContextMenu" />
+                                    <MenuItem Header="Power Off" x:Name="HyperVPowerOffContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Config" x:Name="ConfigContextMenu">
+                                    <MenuItem Header="Detail" x:Name="HyperVDetailContextMenu" />
+                                    <MenuItem Header="Rename" x:Name="HyperVRenameMenu" />
+                                </MenuItem>
+                            </ContextMenu>
+                        </ListView.ContextMenu>
+                    </ListView>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="10">
+                        <Button x:Name="btnLaunchHyperVOptions" Content="_Launch" Width="96" Margin="5" />
+                        <Button x:Name="btnLaunchHyperVConsole" Content="Console" Width="96" Margin="5" />
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>
+@'
+
+#>
+
+#>
 
 [string]$mainwindowXAML = @'
 <Window x:Class="mstsc_msrdc_wrapper.MainWindow"
@@ -99,11 +210,11 @@ drivestoredirect:s:$drivesToRedirect
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:mstsc_msrdc_wrapper"
         mc:Ignorable="d"
-        Title="Guy's mstsc/msrdc Wrapper Script" Height="500" Width="809">
-    <Grid HorizontalAlignment="Left" VerticalAlignment="Top">
-        <TabControl HorizontalAlignment="Center" Height="432" VerticalAlignment="Center" Width="768">
+        Title="Guy's mstsc Wrapper Script" Height="500" Width="809">
+    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+        <TabControl HorizontalAlignment="Stretch" Height="432" VerticalAlignment="Stretch" Width="768">
             <TabItem Header="Main">
-                <Grid>
+                <Grid  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="23*"/>
                         <ColumnDefinition Width="50*"/>
@@ -115,12 +226,11 @@ drivestoredirect:s:$drivesToRedirect
                         <DataGrid x:Name="datagridDisplays" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" SelectionMode="Single" />
                     </StackPanel>
                     <Label Content="Computer" HorizontalAlignment="Left" Height="38" Margin="14,132,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
-                    <Button x:Name="btnLaunch" Content="_Launch" Grid.ColumnSpan="2" HorizontalAlignment="Left" Height="25" Margin="2,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="1"/>
-                    <CheckBox x:Name="chkboxmsrdc" Grid.Column="4" Content="Use msrdc instead of mstsc" HorizontalAlignment="Left" Height="21" Margin="145,189,0,0" VerticalAlignment="Top" Width="292"/>
+                    <CheckBox x:Name="chkboxmsrdc" Grid.Column="4" Content="Use msrdc instead of mstsc" HorizontalAlignment="Left" Height="21" Margin="145,189,0,0" VerticalAlignment="Top" Width="292" IsEnabled="true"/>
                     <ComboBox x:Name="comboboxComputer" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,137,0,0" VerticalAlignment="Top" Width="254" IsEditable="True" IsDropDownOpen="False" Grid.ColumnSpan="3">
                         <ComboBox.ContextMenu>
                             <ContextMenu>
-                                 <MenuItem Header="Delete" x:Name="deleteComputersContextMenu"/>
+                                <MenuItem Header="Delete" x:Name="deleteComputersContextMenu"/>
                             </ContextMenu>
                         </ComboBox.ContextMenu>
                     </ComboBox>
@@ -140,16 +250,15 @@ drivestoredirect:s:$drivesToRedirect
                         </TextBox.InputBindings>
                     </TextBox>
                     <RadioButton x:Name="radioFillScreen" Grid.Column="4" Content="Fill Screen" HorizontalAlignment="Left" Height="24" Margin="145,348,0,0" VerticalAlignment="Top" Width="206" GroupName="WindowSize"/>
+                    <Button x:Name="btnLaunch" Content="_Launch" Grid.ColumnSpan="2" HorizontalAlignment="Left" Height="25" Margin="2,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="1"/>
                     <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="25" Margin="71,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="2" Grid.ColumnSpan="2"/>
                     <Button x:Name="btnCreateShortcut" Content="_Create Shortcut" HorizontalAlignment="Left" Height="25" Margin="14,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="4"/>
                     <Label Content="User" HorizontalAlignment="Left" Height="38" Margin="14,181,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
                     <TextBox x:Name="textboxUsername" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,186,0,0" VerticalAlignment="Top" Width="254" Grid.ColumnSpan="3"/>
-
                 </Grid>
-
             </TabItem>
             <TabItem Header="Mstsc Options">
-                <Grid Margin="0,0,100,100   " Grid.Column="1" Height="200">
+                <Grid Margin="0,0,100,100   " Grid.Column="1" Height="200"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="214*"/>
                         <ColumnDefinition Width="53*"/>
@@ -161,12 +270,10 @@ drivestoredirect:s:$drivesToRedirect
                     <CheckBox x:Name="chkboxRemoteGuard" Content="Remote _Guard" HorizontalAlignment="Left" Height="28" Margin="0,113,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
                     <CheckBox x:Name="chkboxRestrictedAdmin" Content="_Restricted Admin" HorizontalAlignment="Left" Height="28" Margin="0,141,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
                     <Button x:Name="btnLaunchMstscOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-128" IsDefault="True"/>
-
                 </Grid>
             </TabItem>
             <TabItem Header="Other Options">
-
-                <Grid x:Name="OtherRDPOptions" Margin="55,0,528,0" Height="309">
+                <Grid x:Name="OtherRDPOptions" Margin="55,0,528,0" Height="309"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="146*"/>
                         <ColumnDefinition Width="33*"/>
@@ -179,17 +286,16 @@ drivestoredirect:s:$drivesToRedirect
                 </Grid>
             </TabItem>
             <TabItem Header="VMware">
-
-                <Grid x:Name="VMwareOptions" Margin="55,0,409,0" Height="342">
+                <Grid x:Name="VMwareOptions" Margin="55,0,409,0" Height="342"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="129*"/>
                         <ColumnDefinition Width="140*"/>
                     </Grid.ColumnDefinitions>
                     <Button x:Name="btnLaunchVMwareOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24" IsDefault="True"/>
-                    <ListView x:Name="listViewVMwareVMs" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Single" >
+                    <ListView x:Name="listViewVMwareVMs" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Multiple" >
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn/>
+                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}"/>
                             </GridView>
                         </ListView.View>
                     </ListView>
@@ -197,18 +303,150 @@ drivestoredirect:s:$drivesToRedirect
                     <Label Content="Filter" HorizontalAlignment="Left" Height="29" Margin="94,2,0,0" VerticalAlignment="Top" Width="123" Grid.Column="1"/>
                     <CheckBox x:Name="checkBoxVMwareRegEx" Content="RegEx" Height="29" Width="93" Grid.Column="1" Margin="304,41,-255,272" IsChecked="True"/>
                     <TextBox x:Name="textBoxVMwareFilter" TextWrapping="Wrap" Grid.Column="1" Margin="94,39,-143,275" />
-                    <Button x:Name="buttonApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
+                    <Button x:Name="buttonVMwareApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
                     <Label Content="vCenter" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="100,226,0,0" />
                     <TextBox x:Name="textBoxVMwareRDPPort" TextWrapping="Wrap" Height="28" Width="189" Grid.Column="1" Margin="102,156,-136,158" />
                     <Button x:Name="buttonVMwareConnect" Content="_Connect" Height="31" Width="117" Grid.Column="1" Margin="102,301,-64,10"/>
-                    <RadioButton x:Name="radioButtonConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
-                    <RadioButton x:Name="radioButtonConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
+                    <RadioButton x:Name="radioButtonVMwareConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
+                    <RadioButton x:Name="radioButtonVMwareConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
                     <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="97,122,0,0" />
                     <TextBox x:Name="textBoxVMwarevCenter" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
                     <Button x:Name="buttonVMwareDisconnect" Content="_Disconnect" Height="31" Width="117" Grid.Column="1" Margin="240,301,-202,10"/>
                 </Grid>
             </TabItem>
+            <TabItem Header="Hyper-V">
+                <Grid x:Name="HyperVOptions" Margin="55,0,409,0" Height="342"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="160*"/>
+                        <ColumnDefinition Width="160*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="btnLaunchHyperVOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24" IsDefault="True"/>
+                    <Button x:Name="btnLaunchHyperVConsole" Content="C_onsole" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24"  Grid.Column="2" IsDefault="False"/>
+                    <ListView x:Name="listViewHyperVVMs" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Multiple" >
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}"/>
+                                <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}"/>
+                            </GridView>
+                        </ListView.View>
+                        <ListView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Power" x:Name="PowerContextMenu" >
+                                    <MenuItem Header="Power On" x:Name="HyperVPowerOnContextMenu" />
+                                    <MenuItem Header="Power Off" x:Name="HyperVPowerOffContextMenu" />
+                                    <MenuItem Header="Shutdown" x:Name="HyperVShutdownContextMenu" />
+                                    <MenuItem Header="Restart" x:Name="HyperVRestartContextMenu" />
+                                    <MenuItem Header="Resume" x:Name="HyperVResumeContextMenu" />
+                                    <MenuItem Header="Save" x:Name="HyperVSaveContextMenu" />
+                                    <MenuItem Header="Suspend" x:Name="HyperVSuspendContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Config" x:Name="ConfigContextMenu" >
+                                    <MenuItem Header="Detail" x:Name="HyperVDetailContextMenu" />
+                                    <MenuItem Header="Rename" x:Name="HyperVRenameMenu" />
+                                    <MenuItem Header="Reconfigure" x:Name="HyperVReconfigureMenu" />
+                                    <MenuItem Header="Enable Resource Metering" x:Name="HyperVEnableResourceMeteringContextMenu" />
+                                    <MenuItem Header="Performance Data" x:Name="HyperVMeasureContextMenu" />
+                                    <MenuItem Header="Disable Resource Metering" x:Name="HyperVDisableResourceMeteringContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Delete" x:Name="DeletionContextMenu" >
+                                    <MenuItem Header="Delete VM" x:Name="HyperVDeleteContextMenu" />
+                                    <MenuItem Header="Delete VM + Disks" x:Name="HyperVDeleteAllContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="CD" x:Name="CDContextMenu" >
+                                    <MenuItem Header="Mount" x:Name="HyperVMountCDContextMenu" />
+                                    <MenuItem Header="Eject" x:Name="HyperVEjectCDContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Snapshots" x:Name="SnapshotsContextMenu" >
+                                    <MenuItem Header="Manage" x:Name="HyperVManageSnapshotContextMenu" />
+                                    <MenuItem Header="Take Snapshot" x:Name="HyperVTakeSnapshotContextMenu" />
+                                    <MenuItem Header="Revert to Latest Snapshot" x:Name="HyperVRevertLatestSnapshotContextMenu" />
+                                    <MenuItem Header="Delete Latest Snapshot" x:Name="HyperVDeleteLatestSnapshotContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="New" x:Name="NewContextMenu" >
+                                    <MenuItem Header="Brand New" x:Name="HyperVNewVMContextMenu" />
+                                    <MenuItem Header="Templated" x:Name="HyperVNewVMFromTemplateContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Name to Clipboard" x:Name="HyperVNameToClipboard" />
+                                <MenuItem Header="NICS" x:Name="NICSContextMenu" >
+                                    <MenuItem Header="Disconnect NIC" x:Name="HyperVDisconnectNICContextMenu" />
+                                    <MenuItem Header="Connect To" x:Name="ConnectNICContextMenu" >
+                                        <MenuItem Header="Internal" x:Name="HyperVConnectNICInternalContextMenu" />
+                                        <MenuItem Header="External" x:Name="HyperVConnectNICExternalContextMenu" />
+                                        <MenuItem Header="Private"  x:Name="HyperVConnectNICPrivateContextMenu" />
+                                    </MenuItem>
+                                </MenuItem>
+                            </ContextMenu>
+                        </ListView.ContextMenu>
+                    </ListView>
+                    <Label x:Name="labelHyperVVMs" Content="VMs" HorizontalAlignment="Center" Height="29" Margin="0,5,0,0" VerticalAlignment="Top" Width="122"/>
+                    <Label Content="Filter" HorizontalAlignment="Left" Height="29" Margin="94,2,0,0" VerticalAlignment="Top" Width="40" Grid.Column="1"/>
+                    <CheckBox x:Name="checkBoxHyperVRegEx" Content="RegE_x" Height="29" Width="93" Grid.Column="1" Margin="304,35,-255,272" IsChecked="True"/>
+                    <CheckBox x:Name="checkBoxHyperVAllVMs" Content="_All VMs" Height="29" Width="93" Grid.Column="2" Margin="304,55,-255,272" IsChecked="False"/>
+                    <TextBox x:Name="textBoxHyperVFilter" TextWrapping="Wrap" Grid.Column="1" Margin="94,39,-143,275" />
+                    <Button x:Name="buttonHyperVApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
+                    <Button x:Name="buttonHyperVClearFilter" Content="Clea_r Filter" Height="31" Width="117" Grid.Column="1" Margin="240,86,-202,225"/>
+                    <Label Content="Host" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="100,226,0,0" />
+                    <TextBox x:Name="textBoxHyperVRDPPort" TextWrapping="Wrap" Height="28" Width="189" Grid.Column="1" Margin="102,156,-136,158" />
+                    <Button x:Name="buttonHyperVConnect" Content="_Connect" Height="31" Width="117" Grid.Column="1" Margin="102,301,-64,10"/>
+                    <RadioButton x:Name="radioButtonHyperVConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
+                    <RadioButton x:Name="radioButtonHyperVConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
+                    <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="154" Grid.Column="1" Margin="97,122,0,0" />
+                    <TextBox x:Name="textBoxHyperVHost" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
+                </Grid>
+            </TabItem>
         </TabControl>
+    </Grid>
+</Window>
+'@
+#>
+
+[string]$textInputXAML = @'
+<Window x:Class="WPF_Scratchpad.Window1"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:WPF_Scratchpad"
+        mc:Ignorable="d"
+        Title="Window1" Height="450" Width="800">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="4*"/>
+            <ColumnDefinition Width="30*"/>
+            <ColumnDefinition/>
+            <ColumnDefinition Width="365*"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="textboxInputText" HorizontalAlignment="Left" Height="85" Margin="45,52,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="347" Grid.ColumnSpan="3" Grid.Column="1"/>
+        <Label x:Name="lblInputTextLabel" Content="Label" HorizontalAlignment="Left" Height="27" Margin="45,10,0,0" VerticalAlignment="Top" Width="253" Grid.ColumnSpan="3" Grid.Column="1"/>
+        <Button x:Name="btnInputTextOK" Content="OK" HorizontalAlignment="Left" Height="39" Margin="45,157,0,0" VerticalAlignment="Top" Width="89" Grid.ColumnSpan="3" IsDefault="True" Grid.Column="1"/>
+        <Button x:Name="btnInputTextCancel" Content="Cancel" HorizontalAlignment="Left" Height="39" Margin="110,157,0,0" VerticalAlignment="Top" Width="88" Grid.Column="3" IsCancel="True"/>
+
+    </Grid>
+</Window>
+'@
+
+[string]$snapshotsXAML = @'
+<Window x:Class="mstsc_GUI.Snapshots"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VMWare_GUI"
+        mc:Ignorable="d"
+        Title="Snapshots" Height="450" Width="800">
+    <Grid>
+        <TreeView x:Name="treeSnapshots" HorizontalAlignment="Left" Height="246" Margin="85,74,0,0" VerticalAlignment="Top" Width="471"/>
+        <Grid Margin="593,88,85,128" >
+            <Button x:Name="btnTakeSnapshot" Content="_Take Snapshot" HorizontalAlignment="Left" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDeleteSnapshot" Content="De_lete" HorizontalAlignment="Left" Margin="0,172,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnRevertSnapshot" Content="_Revert" HorizontalAlignment="Left" Margin="0,83,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnConsolidateSnapshot" Content="_Consolidate" HorizontalAlignment="Left" Margin="0,129,0,0" VerticalAlignment="Top" Width="92"/>
+            <Button x:Name="btnDetailsSnapshot" Content="_Details" HorizontalAlignment="Left" Margin="0,42,0,0" VerticalAlignment="Top" Width="92"/>
+        </Grid>
+        <Button x:Name="btnSnapshotsOk" Content="OK" HorizontalAlignment="Left" Margin="95,365,0,0" VerticalAlignment="Top" Width="75" IsDefault="True"/>
+        <Button x:Name="btnSnapshotsCancel" Content="Cancel" HorizontalAlignment="Left" Margin="198,365,0,0" VerticalAlignment="Top" Width="75" IsCancel="True"/>
+        <Label x:Name="lblLastRevert" Content="Last Revert" HorizontalAlignment="Left" Height="29" Margin="85,23,0,0" VerticalAlignment="Top" Width="622"/>
+        <Button x:Name="btnDeleteSnapShotTree" Content="Delete _Tree" HorizontalAlignment="Left" Margin="593,300,0,0" VerticalAlignment="Top" Width="92"/>
     </Grid>
 </Window>
 '@
@@ -316,6 +554,477 @@ Function Set-WindowToFront
     $setForegroundWindow ## return
 }
 
+Function Process-Snapshot
+{
+    Param
+    (
+        $GUIobject ,
+        $Operation ,
+        $VM
+    )
+    
+    $_.Handled = $true
+    
+    [bool]$closeDialogue = $true
+
+    if( $null -eq $VM )
+    {
+        [void][Windows.MessageBox]::Show( 'No VM passed to Process-Snapshot' , $Operation , 'Ok' ,'Error' )
+        return
+    }
+
+    if( $operation -eq 'ConsolidateSnapshot' )
+    {
+        ## $VM = Get-VM -Id $VMId
+        if( ! ( $task = $VM.ExtensionData.ConsolidateVMDisks_Task() ) `
+            -or ! ($taskStatus = Get-Task -Id $task) `
+                -or $taskStatus.State -eq 'Error' )
+        {
+            [void][Windows.MessageBox]::Show( 'Task Failed' , $Operation , 'Ok' ,'Error' )
+        }
+        else
+        {
+            [void][Windows.MessageBox]::Show( 'Task Started' , $Operation , 'Ok' ,'Information' )
+        }
+        $closeDialogue = $false
+    }
+    elseif( $Operation -eq 'TakeSnapShot' )
+    {
+        if( $takeSnapshotForm = New-Form -inputXaml $takeSnapshotXAML )
+        {
+            $takeSnapshotForm.Title += " of $($vm.name)"
+
+            $WPFbtnTakeSnapshotOk.Add_Click({ 
+                $_.Handled = $true
+                $takeSnapshotForm.DialogResult = $true 
+                $takeSnapshotForm.Close()  })
+
+            if( $VM = Get-VM -Id $VMId )
+            {
+                if( $VM.PowerState -eq 'PoweredOff' ) 
+                {
+                    $wpfchkSnapshotQuiesce.IsEnabled = $false
+                    $WPFchckSnapshotMemory.IsEnabled = $false
+                }
+                elseif( $VM.Guest.State -eq 'NotRunning' )
+                {
+                    $wpfchckSnapshotShutdownStart.IsEnabled = $false ## won't be able to shut it down cleanly so don't offer it
+                }
+
+                if( $takeSnapshotForm.ShowDialog() )
+                {
+                    if( $VM = Get-VM -Id $VMId )
+                    {
+                        ## Get Data from form and take snapshot
+                        [hashtable]$parameters = @{ 'VM' = $vm ; 'RunAsync' = $true }
+                        if( ! [string]::IsNullOrEmpty( $WPFtxtSnapshotName.Text ) )
+                        {
+                            $parameters.Add( 'Name' , $WPFtxtSnapshotName.Text )
+                        }
+                        else
+                        {
+                            return
+                        }
+                        if( ! [string]::IsNullOrEmpty( $WPFtxtSnapshotDescription.Text ) )
+                        {
+                            $parameters.Add( 'Description' , $WPFtxtSnapshotDescription.Text )
+                        }
+                        $parameters.Add( 'Quiesce' , $wpfchkSnapshotQuiesce.IsChecked )
+                        $parameters.Add( 'Memory' , $WPFchckSnapshotMemory.IsChecked )
+         
+                        [string]$answer = 'yes'
+
+                        if( $wpfchckSnapshotShutdownStart.IsChecked )
+                        {
+                            if( $VM.PowerState -ne 'PoweredOff' -and ( $answer = [Windows.MessageBox]::Show( "VM $($VM.Name)" , "Confirm Shutdown & Startup" , 'YesNo' ,'Question' ) ) -and $answer -ieq 'yes' )
+                            {
+                                $shutdownError = $null
+                                if( -Not ( $guest = Shutdown-VMGuest -VM $VM -ErrorVariable shutdownError -Confirm:$false ) )
+                                {
+                                    $answer = 'abort'
+                                    [void][Windows.MessageBox]::Show( $shutdownError , "Shutdown Error for $($VM.Name)" , 'Ok' ,'Error' )
+                                }
+                                else
+                                {
+                                    [datetime]$endWaitTime = [datetime]::Now.AddSeconds( $powerActionWaitTimeSeconds )
+                                    Write-Verbose -Message "$(Get-Date -Format G): waiting for VM to shutdown until $(Get-Date -Date $endWaitTime -Format G)"
+                                    do
+                                    {
+                                        Start-Sleep -Seconds 5
+                                        $VM = Get-VM -Id $VMId
+                                    }
+                                    while( $VM -and $VM.PowerState -ne 'PoweredOff' -and [datetime]::Now -le $endWaitTime )
+                                    
+                                    Write-Verbose -Message "$(Get-Date -Format G): finished waiting for VM $($VM.Name) to shutdown - power state is $($VM|Select-Object -ExpandProperty PowerState)"
+
+                                    if( -Not $VM -or $VM.PowerState -ne 'PoweredOff' )
+                                    {
+                                        [void][Windows.MessageBox]::Show( "Timed out waiting $powerActionWaitTimeSeconds seconds for shutdown to complete" , "Shutdown Error for $($VM.Name)" , 'Ok' ,'Error' )
+                                        $answer = 'abort'
+                                    }
+                                    $parameters[ 'RunAsync' ] = $false
+                                }
+                            }
+                        }
+
+                        if( $answer -ieq 'yes' )
+                        {
+                            New-Snapshot @parameters
+                            if( $? -and $wpfchckSnapshotShutdownStart.IsChecked )
+                            {
+                                Start-VM -VM $VM -RunAsync
+                            }
+                        }
+                    }
+                    else
+                    {
+                        [void][Windows.MessageBox]::Show( "Failed to get VM" , "Snapshot Error for $($VM.Name)" , 'Ok' ,'Error' )
+                    }
+                }
+            }
+            else
+            {
+                [void][Windows.MessageBox]::Show( "Failed to get VM" , "Snapshot Error for $($VM.Name)" , 'Ok' ,'Error' )
+            }
+        }
+    }
+    elseif( $Operation -eq 'DetailsSnapshot' )
+    {
+        $closeDialogue = $false
+        if( $VM ) ## =  Get-VM -Id $VMId )
+        {
+            [string]$tag = $null
+            if( $GUIobject.SelectedItem -and $GUIobject.PSObject.Properties[ 'SelectedItem' ] )
+            {
+                $tag = $GUIobject.SelectedItem.Tag
+            }
+            elseif( $GUIobject.Items.Count -eq 1 )
+            {
+                ## if only one snapshot then report on that one
+                $tag = $GUIobject.Items[0].Tag
+            }
+            else
+            {
+                [void][Windows.MessageBox]::Show( 'No snapshot selected' , $Operation , 'Ok' ,'Error' )
+                return
+            }
+            if( $tag -eq $youAreHereSnapshot )
+            {
+                return
+            }
+            if( $snapshot = $script:theseSnapshots | Where-Object Id -eq $tag)
+            {
+                [uint64]$size = 0
+                ForEach( $disk in $snapshot.HardDrives  )
+                {
+                    $file = $null
+                    ## needs backslashes escaping - file could be remote
+                    $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $snapshot.CimSession
+                    if( $null -ne $file )
+                    {
+                        $size += $file.FileSize
+                    }
+                }
+                [string]$details = "Name = $($snapshot.Name)`n`rNotes = $($snapshot.Notes)`n`rCreated = $($snapshot.CreationTime.ToString('G'))`n`rSize = $([math]::Round( $size / 1GB , 2))GB`n`rType = $($snapshot.SnapshotType)`n`rPower State = $($snapshot.State)`n`rAutomatic = $(if( $snapshot.IsAutomaticCheckpoint ) { 'Yes' } else {'No' })"
+                [void][Windows.MessageBox]::Show( $details , 'Snapshot Details' , 'Ok' ,'Information' )
+            }
+            else
+            {
+                Write-Warning "Unable to get snapshot $($GUIobject.SelectedItem.Tag) for `"$($VM.Name)`""
+            }
+        }
+        else
+        {
+            Write-Warning "Unable to get vm for vm id $vmid"
+        }
+    }
+    elseif( ! $GUIobject -or ( $GUIobject.SelectedItem -and $GUIobject.SelectedItem.Tag -and $GUIobject.SelectedItem.Tag -ne $youAreHereSnapshot ) )
+    {
+        ##$VM = Get-VM -Id $VMId
+        if( $VM )
+        {
+            if( $Operation -eq 'LatestSnapshotRevert' )
+            {
+                if( ! ( $snapshot = Get-VMSnapshot -VM $vm -verbose:$false | Sort-Object -Property CreationTime -Descending|Select-Object -First 1 ))
+                {
+                    [Windows.MessageBox]::Show( "No snapshots found for $($vm.Name)" , 'Snapshot Revert Error' , 'OK' ,'Error' )
+                    return
+                }
+            }
+            else
+            {
+                ##$snapshot = Get-VMSnapshot -Name $GUIobject.SelectedItem.Tag -VM $vm -verbose:$false
+                $snapshot = $script:theseSnapshots | Where-Object Id -eq $GUIobject.SelectedItem.Tag
+            }
+            if( $snapshot )
+            {
+                [string]$answer = 'no'
+                [string]$questionText = $null
+
+                if( $Operation -eq 'DeleteSnapShotTree' )
+                {
+                    $questionText = 'From snapshot'
+                }
+                else
+                {
+                    $questionText = 'Snapshot'
+                }
+
+                $questionText += " `"$($snapshot.Name)`" on $($vm.Name), taken $($snapshot.CreationTime.ToString('G')) ?"
+                $answer = [Windows.MessageBox]::Show( $questionText , "Confirm $($operation -creplace '([a-zA-Z])([A-Z])' , '$1 $2')" , 'YesNo' ,'Question' )
+        
+                if( $answer -eq 'yes' )
+                {
+                    if( $Operation -eq 'DeleteSnapShot' )
+                    {
+                        Remove-VMSnapshot -VMSnapshot $snapshot -AsJob -Confirm:$false
+                    }
+                    elseif( $Operation -eq 'DeleteSnapShotTree' )
+                    {
+                        Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false -IncludeAllChildSnapshots -AsJob
+                    }
+                    elseif( $Operation -eq 'RevertSnapShot' -or $Operation -eq 'LatestSnapshotRevert' )
+                    {
+                        $answer = $null
+                        if( $snapshot.State -ieq 'Off' )
+                        {
+                            $answer = [Windows.MessageBox]::Show( "Power on after snapshot restored on $($vm.Name)?" , 'Confirm Power Operation' , 'YesNo' ,'Question' )
+                        }
+                        [hashtable]$revertParameters = @{ 'VMSnapshot' = $snapshot ;'Confirm' = $false ; AsJob = ($answer -ne 'Yes') }
+                        Restore-VMSnapshot @revertParameters
+                        if( $answer -eq 'Yes' )
+                        {
+                            Start-VM -VM $vm -Confirm:$false
+                        }
+                    }
+                    else
+                    {
+                        Write-Warning "Unexpected snapshot operation $operation"
+                    }
+                }
+                else
+                {
+                    $closeDialogue = $false
+                }
+            }
+            else
+            {
+                Write-Warning "Unable to get snapshot $($GUIobject.SelectedItem.Tag) for `"$($VM.Name)`""
+            }
+        }
+        else
+        {
+            Write-Warning "Unable to get vm for vm id $vmid"
+        }
+    }
+    else
+    {
+        $closeDialogue = $false
+    }
+
+    if( $closeDialogue -and (Get-Variable -Name snapshotsForm -ErrorAction SilentlyContinue) -and $snapshotsForm )
+    {
+        ## Close dialog since needs refreshing
+        $snapshotsForm.DialogResult = $true 
+        $snapshotsForm.Close()
+        $snapshotsForm = $null
+    }
+}
+
+Function Find-TreeItem
+{
+    Param
+    (
+        [array]$controls ,
+        [string]$tag
+    )
+
+    $result = $null
+
+    ForEach( $control in $controls )
+    {
+        if( $null -eq $result )
+        {
+            if( $control.Tag -eq $tag )
+            {
+                $result = $control
+            }
+            elseif( $control.PSobject.Properties[ 'Items' ] )
+            {
+                ForEach( $item in $control.Items )
+                {
+                    if( $item.Tag -eq $tag )
+                    {
+                        $result = $item
+                    }
+                    elseif( $item.PSobject.Properties[ 'Items' ] -and $item.Items.Count )
+                    {
+                        $result = Find-TreeItem -control $item.Items -tag $tag
+                    }
+                }
+            }
+        }
+    }
+
+    $result
+}
+
+## https://blog.ctglobalservices.com/powershell/kaj/powershell-wpf-treeview-example/
+
+Function Add-TreeItem
+{
+    Param
+    (
+          $Name,
+          $Parent,
+          $Tag 
+    )
+
+    $ChildItem = New-Object System.Windows.Controls.TreeViewItem
+    $ChildItem.Header = $Name
+    $ChildItem.Name = $Name -replace '[/\s,;:\.\-\+)(]' , '_' -replace '%252f' , '_' -replace '&' , '_' # default snapshot names have / for date which are escaped
+    $ChildItem.Tag = $Tag
+    $ChildItem.IsExpanded = $true
+    ##[Void]$ChildItem.Items.Add("*")
+    [Void]$Parent.Items.Add($ChildItem)
+}
+
+Function Show-SnapShotWindow
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        $vmName
+    )
+
+    $thisVM = Hyper-V\Get-VM -Name $vmName @hypervParameters
+    $script:theseSnapshots = @( Get-VMCheckpoint -VMName $vmName @hypervParameters )
+    if( $null -eq $script:theseSnapshots -or $script:theseSnapshots.Count -eq 0)
+    {
+        [void][Windows.MessageBox]::Show( "No snapshots found for $vmName" , 'Snapshot Management' , 'Ok' ,'Warning' )
+        return
+    }
+
+    $snapshotsForm = New-WPFWindow -inputXAML $snapshotsXAML
+
+    [bool]$result = $false
+    if( $snapshotsForm )
+    {
+        $snapshotsForm.Title += " for $vmName"
+
+        ForEach( $snapshot in $script:theseSnapshots )
+        {
+            ## if has a parent we need to find that and add to it
+            if( $snapshot.ParentSnapshotId )
+            {
+                ## find where to add our node
+                $parent = $script:theseSnapshots | Where-Object Id -eq $snapshot.ParentSnapshotId
+                if( $parent )
+                {
+                    $parentNode = Find-TreeItem -control $WPFtreeSnapshots -tag $snapshot.ParentSnapshotId
+                    if( $parentNode )
+                    {
+                        Add-TreeItem -Name $snapshot.Name -Parent $parentNode -Tag $snapshot.Id 
+                    }
+                    else
+                    {
+                        Write-Warning "Unable to locate tree view item for parent snapshot `"$($snapshot.parent)`""
+                    }
+                }
+                else
+                {
+                    Write-Warning "Unable to locate parent snapshot `"$($snapshot.Parent)`" for snapshot `"$($snapshot.Name)`" for $vmName"
+                }
+            }
+            else ## no parent then needs to be top level node but check not already created because we enountered a child previously
+            {
+                Add-TreeItem -Name $snapshot.Name -Parent $WPFtreeSnapshots -Tag $snapshot.Id
+            }
+        }
+        
+        [string]$currentSnapShotId = $null
+        if( $currentSnapShot = $script:theseSnapshots | Where-Object Id -eq $thisVM.ParentCheckpointId)
+        {
+            $currentSnapShotId = $currentSnapShot.Id
+        }
+        if( $currentSnapShotId )
+        {
+            if( ($currentSnapShotItem = Find-TreeItem -control $WPFtreeSnapshots -tag $currentSnapShotId ))
+            {
+                Add-TreeItem -Name '__You are here__' -Parent $currentSnapShotItem -Tag $youAreHereSnapshot
+            }
+            else
+            {
+                Write-Warning "Unable to locate tree view item for current snapshot"
+            }
+        }
+        else
+        {
+            Write-Warning "No current snapshot set for $vmName"
+        }
+
+        $WPFbtnSnapshotsOk.Add_Click({
+            $_.Handled = $true 
+            $snapshotsForm.DialogResult = $true 
+            $snapshotsForm.Close()  })
+
+        ## get last revert operation
+## TODO event logs?
+<#
+        $lastRevert = Get-VIEvent -Entity $vm.Name -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties[ 'EventTypeId' ] -and $_.EventTypeId -eq 'com.vmware.vc.vm.VmStateRevertedToSnapshot' -and $_.FullFormattedMessage -match 'has been reverted to the state of snapshot (.*), with ID \d' } | Select-Object -First 1
+        [string]$text = $null
+        if( $lastRevert )
+        {
+            $text = "Last revert was to snapshot `"$($Matches[1])`" on $(Get-Date -Date $lastRevert.CreatedTime -Format G)"
+        }
+        else
+        {
+            $text = "No snapshot revert event found"
+        }
+        $wpflblLastRevert.Content = $text
+        ## see if consolidation is required so that we enable/disable the consolidation button
+        $wpfbtnConsolidateSnapshot.IsEnabled = $vm.Extensiondata.Runtime.ConsolidationNeeded
+                     
+#>   
+        $WPFbtnTakeSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'TakeSnapShot' -VM $thisVM } )
+        $WPFbtnDeleteSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DeleteSnapShot' -VM $thisVM} )
+        $WPFbtnDeleteSnapShotTree.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DeleteSnapShotTree' -VM $thisVM} )
+        $WPFbtnRevertSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'RevertSnapShot' -VM $thisVM} )
+        $WPFbtnDetailsSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'DetailsSnapShot' -VM $thisVM} )
+        $WPFbtnConsolidateSnapshot.Add_Click( { Process-Snapshot -GUIobject $WPFtreeSnapshots -Operation 'ConsolidateSnapShot' -VMId $thisVM } )
+
+        $result = $snapshotsForm.ShowDialog()
+     }
+}
+
+Function Sort-Columns( $control )
+{
+    if( $view =  [Windows.Data.CollectionViewSource]::GetDefaultView($control.ItemsSource) )
+    {
+        [string]$direction = 'Ascending'
+        if(  $view.PSObject.Properties[ 'SortDescriptions' ] -and $view.SortDescriptions -and $view.SortDescriptions.Count -gt 0 )
+        {
+	        $sort = $view.SortDescriptions[0].Direction
+	        $direction = if( $sort -and 'Descending' -eq $sort){ 'Ascending' } else { 'Descending' }
+	        $view.SortDescriptions.Clear()
+        }
+
+        Try
+        {
+            [string]$column = $_.OriginalSource.Column.DisplayMemberBinding.Path.Path ## has to be name of the binding, not the header unless no binding
+            if( [string]::IsNullOrEmpty( $column ) )
+            {
+                $column = $_.OriginalSource.Column.Header
+            }
+	        $view.SortDescriptions.Add( ( New-Object ComponentModel.SortDescription( $column , $direction ) ) )
+        }
+        Catch
+        {
+        }
+    }
+}
+
 Function New-RemoteSession
 {
     [CmdletBinding()]
@@ -416,10 +1125,31 @@ Function New-RemoteSession
         Write-Verbose -Message "Running $exe $commandLine"
 
         $process = $null
+        
+        ## recreate in case temp been tidied since script started
+        if( -Not ( Test-Path -Path $tempFolder -PathType Container ) -and -Not ( New-Item -Path $tempFolder -ItemType Directory -Force ) )
+        {
+            Throw "Failed to create temp folder $tempFolder"
+        }
 
-        [string]$tempRdpFile = $null
-        [string]$windowTitle = ' - Remote Desktop Connection$'
+        ## mstsc title bar uses filename before first dot and address so if we use address in filename it duplicates it
+        ## as differentiator in host names is at the right hand side then reverse the name used in the rdp file so the last characters are first
+        [string]$filename = $address.ToUpper()
+        if( $reverse )
+        {
+            [array]$array = $address.ToCharArray()
+            [array]::Reverse( $array )
+            $filename = ($array -join '').ToUpper()
+        }
+        elseif( -Not [string]::IsNullOrEmpty( $remove ) )
+        {
+            $filename = $address -replace $remove ## designed to remove the leading characters of the name which will all be the same/similar eg GLHVS22 and makes icons difficult to distinguish
+        }
+        [string]$tempRdpFile = Join-Path -Path $tempFolder -ChildPath "$filename.rdp"
+        [string]$windowTitle = "^$filename - $address - Remote Desktop Connection$"
 
+        ## using our own folder so drop tmp from name since makes right click on mstsc taskbar icon look crap
+        <#
         if( -Not ( $tempFile = New-TemporaryFile  ) )
         {
             Throw "Unable to create temporary file for rdp settings"
@@ -430,6 +1160,7 @@ Function New-RemoteSession
         {
             Throw "Failed to move $tempFile to $tempRdpFile"
         }
+        #>
 
         ## mstsc file will have things in it doesn't understand which it silently ignores
         
@@ -443,7 +1174,11 @@ Function New-RemoteSession
 
         if( $usemsrdc )
         {
-            if( -Not ( Get-Command -Name ($exe = 'msrdc.exe') -CommandType Application -ErrorAction SilentlyContinue ) )
+            if( -Not [string]::IsNullOrEmpty( $msrdcCopyPath ) )
+            {
+                $exe = $msrdcCopyPath
+            }
+            elseif( -Not ( Get-Command -Name ($exe = 'msrdc.exe') -CommandType Application -ErrorAction SilentlyContinue ) )
             {
                 if( $apppathskey = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msrdc.exe' -ErrorAction SilentlyContinue ) 
                 {
@@ -464,9 +1199,38 @@ Function New-RemoteSession
                 {
                     $exe = Join-Path -Path $installPath -ChildPath 'msrdc.exe'
                 }
+                elseif( $appx = Get-AppxPackage -Name '*.Windows365' | Sort-Object -Property Version -Descending | Select-Object -First 1 )
+                {
+                    ## cannot execute it directly from here so we take a copy (hopefully Ivanti Application Control's Trusted Ownership won't bite us :-) )
+                    [string]$copyToFolder = $msrdcCopyFolder
+                    if( [string]::IsNullOrEmpty( $copyToFolder ) )
+                    {
+                        $copyToFolder = [System.IO.Path]::Combine( $env:LOCALAPPDATA , 'Programs' , $msrdcCopyName )
+                    }
+                    if( -Not (Test-Path -Path $copyToFolder) )
+                    {
+                        New-Item -Path $copyToFolder -ItemType Directory -Force ## if it errors, so be it
+                    }
+                    $appxMsrdcVersion = Get-ItemProperty -Path ( Join-Path $appx.InstallLocation -ChildPath 'msrdc\msrdc.exe' ) | Select-Object -ExpandProperty VersionInfo | Select-Object -ExpandProperty FileVersionRaw
+                    if( -Not ( $copyProperties = Get-ItemProperty -Path (Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe') -ErrorAction SilentlyContinue) -or $appxMsrdcVersion -gt $copyProperties.VersionInfo.FileVersionRaw ) 
+                    {
+                        Write-Verbose "Copying from $($appx.InstallLocation ) to $copyToFolder"
+                        Copy-Item -Path (Join-Path $appx.InstallLocation -ChildPath 'msrdc\*') -Destination $copyToFolder -Recurse -Force
+                    }
+                    else
+                    {
+                        Write-Verbose -Message "msrdc copy folder `"$copyToFolder`" already exists"
+                    }
+                    $exe = Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe' 
+                }
                 else
                 {
-                    $exe = 'C:\Program Files\Remote Desktop\msrdc.exe'
+                    $exe = [System.IO.Path]::Combine( ([Environment]::GetFolderPath( [Environment+SpecialFolder]::ProgramFiles )) , 'Remote Desktop' , 'msrdc.exe' )
+                    if( -Not ( Test-Path -Path $exe -PathType Leaf ) )
+                    {
+                        $exe = [System.IO.Path]::Combine( ([Environment]::GetFolderPath( [Environment+SpecialFolder]::ProgramFilesX86 )) , 'Remote Desktop' , 'msrdc.exe' )
+                        ## TODO what if per user install?
+                    }
                 }
             }
             
@@ -478,31 +1242,47 @@ Function New-RemoteSession
                 $windowTitle = $remoteDesktopName
             }
 
-            $commandLine = "`"$tempRdpFile`" /u:$username"
+            $commandLine = "`"$tempRdpFile`""
+            if( -Not [string]::IsNullOrEmpty( $username ) )
+            {
+                $commandLine = "$commandLine /u:$username"
+            }
+            if( -Not [string]::IsNullOrEmpty( $extraMsrdcParameters ) )
+            {
+                $commandLine = "$commandLine $extraMsrdcParameters"
+            }
+            if( -Not $nofriendlyName )
+            {
+                $commandLine = "$commandLine /friendlyname:`"$filename`""
+                $windowTitle = $filename
+            }
         }
         else ## mstsc
         {
+        <#
             ## window title comes from the base name of the .rdp file so if we don't rename the temp file, that will be the name in the title bar which is fugly
             [string]$tempRdpFileWithName = Join-Path -Path (Split-Path -Path $tempRdpFile -Parent) -ChildPath "$($address -replace ':' , '.').$(Split-Path -Path $tempRdpFile -Leaf)"
             if( Move-Item -Path $tempRdpFile -Destination $tempRdpFileWithName -PassThru )
             {
                 $tempRdpFile = $tempRdpFileWithName
             }
-            $commandline = "`"$tempRdpFile`" $commandLine"
+        #>
+            $commandline = "`"$tempRdpFile`"" ## $commandLine" ## everything is in the rdp file
         }
         
         ## see if we already have a window with this title so we can offer to switch to that or create a new one
         $existingWindows = $null
-        $existingWindows = [Api.Apidef]::GetWindows( -1 ) | Where-Object WinTitle -ieq $windowTitle
+        $existingWindows = [Api.Apidef]::GetWindows( -1 ) | Where-Object WinTitle -imatch $windowTitle
+        $otherProcess = $null
 
         if( $null -ne $existingWindows )
         {
             Write-Verbose -Message "Already have window `"$windowTitle`" in process $($existingWindows.PID)"
             
-            $answer = [Windows.MessageBox]::Show(  'Activate Existing Window ?' , "Already Connected to $address" , 'YesNoCancel' ,'Question' )
+            $otherprocess = Get-Process -Id $existingWindows.PID
+            $answer = [Windows.MessageBox]::Show(  "Activate Existing Window ?`nLaunched $($otherprocess.StartTime.ToString('G'))" , "Already Connected to $address" , 'YesNoCancel' ,'Question' )
             if( $answer -ieq 'yes' )
             {
-                $otherprocess = Get-Process -Id $existingWindows.PID
                 if( $otherprocess )
                 {
                     if( -Not ( Set-WindowToFront -windowHandle $otherprocess.MainWindowHandle ))
@@ -521,6 +1301,10 @@ Function New-RemoteSession
             {
                 return
             }
+            else
+            {
+                $otherProcess = $null
+            }
         }
 
         if( -Not [string]::IsNullOrEmpty( $rdpFileContents ) )
@@ -534,6 +1318,8 @@ Function New-RemoteSession
             }
         }
         
+        $process = $null
+
         ## use Start-Process so we can get a pid and thus window handle to move to chosen display
         $process = Start-Process -FilePath $exe -ArgumentList $commandLine -PassThru -WindowStyle Normal
 
@@ -561,24 +1347,23 @@ Function New-RemoteSession
         {
             $endTime = [datetime]::Now.AddSeconds( $windowWaitTimeSeconds )
         }
+        $existingProcesses = @()
+        if( $usemsrdc )
+        {
+            $existingProcesses = @( Get-Process -Name msrdc -ErrorAction SilentlyContinue )
+        }
         ## can take a little time for the window to appear and get the title so we poll :-(
+## TODO change search string when connecting to IP - window title is "192 - 192.168.1.32 - Remote Desktop Connection"
         do
         {
-            $allWindowsNow = @( [Api.Apidef]::GetWindows( -1 ) | Where-Object WinTitle -ieq $windowTitle )
+            $allWindowsNow = @( [Api.Apidef]::GetWindows( -1 ) | Where-Object WinTitle -match $windowTitle )
             ForEach( $window in $allWindowsNow )
             {
-                ## could switch process because of the way msrdc seems to work
-                if( ( $process = Get-Process -Id $window.PID -ErrorAction SilentlyContinue ) -and $process.Name -eq $baseExe )
+                ## Need to find our new window, not any existing one
+                if( ( $existingProcess = Get-Process -Id $window.PID -ErrorAction SilentlyContinue ) -and $existingProcess.Name -eq $baseExe  )
                 {
-                    [bool]$existing = $false
-                    ForEach( $existingWindow in $existingWindows ) ## if there weren't any existing windows with this title, there may be now but it may be for a different msrdc process if one was already running for another machine
-                    {
-                        if( $existing = $window.WinHwnd -eq $existingWindow.WinHwnd )
-                        {
-                            break
-                        }
-                    }
-                    if( -Not $existing )
+                    ## if msrdc then it may have used an existing process :(
+                    if( $existingProcess.StartTime -ge $process.StartTime -or $existingProcesses.Count -gt 0 )
                     {
                         $windowPid = $window.PID
                         break
@@ -590,6 +1375,12 @@ Function New-RemoteSession
                 if( $usemsrdc )
                 {
                     ## TODO can't simply check if process has exited as msrdc can re-use existing plus if prompting for credentials it will be a process CredentialUIBroker.exe which is not a child of msrdc
+                    if( $null -eq $existingProcesses -or $existingProcesses.Count -eq 0 )
+                    {
+                        Write-Warning -Message "Process $($process.Id) has exited and no previous instances"
+                        break
+                    }
+
                 }
                 else
                 {
@@ -612,7 +1403,8 @@ Function New-RemoteSession
 
         if( -not $process -or -Not $process.MainWindowHandle )
         {
-            Throw "No main window handle for process $($process.id)"
+            Write-Warning "No main window handle for process $($process.id)"
+            return
         }
 
         if( -Not $noMove )
@@ -629,7 +1421,6 @@ Function New-RemoteSession
                     Write-Warning -Message "Failed ShowWindowAsync to unmaximise - $lastError"
                 }
             }
-
             ## https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos
 
             [int]$flags = 0x4041 ## SWP_NOSIZE (leave size alone ) | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
@@ -706,7 +1497,7 @@ Function New-RemoteSession
     {
         if( $tempRdpFile )
         {
-            Remove-Item -Path $tempRdpFile -Force
+            Remove-Item -Path $tempRdpFile -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -756,10 +1547,13 @@ Function Set-RemoteSessionProperties
     {
         [void][Windows.MessageBox]::Show( 'No Computer Selected' , 'Select a computer or enter a name/address' , 'Ok' ,'Error' )
     }
+    ## get primary monitor
+    <#
     elseif( ( $WPFdatagridDisplays.SelectedItems.Count -ne 1 -and $activeDisplaysWithMonitors.Count -gt 1 ) -and -not $WPFchkboxPrimary.IsChecked )
     {
         [void][Windows.MessageBox]::Show( 'No Monitor Selected' , 'Select a Monitor' , 'Ok' ,'Error' )
     }
+    #>
     elseif( $WPFradioPercentage.IsChecked -and [string]::IsNullOrEmpty( $WPFtxtboxScreenPercentage.Text ))
     {
         [void][Windows.MessageBox]::Show( 'No Screen Percentage Entered' , 'Enter a screen percentage' , 'Ok' ,'Error' )
@@ -772,7 +1566,8 @@ Function Set-RemoteSessionProperties
     {
         if( -Not ( $chosen = $WPFdatagridDisplays.SelectedItems ) )
         {
-            $chosen = $WPFdatagridDisplays.Items[0] ## no monitor selected but only one monitor
+            $chosen = $WPFdatagridDisplays.items | Where-Object -Property ScreenPrimary -eq 'true' -ErrorAction SilentlyContinue
+            ##$chosen = $WPFdatagridDisplays.Items[0] ## no monitor selected but only one monitor
         }
         if( [string]::IsNullOrEmpty( $connectTo ) )
         {
@@ -894,7 +1689,7 @@ Function Set-WindowContent
         if( $itemsCopy -and $itemsCopy.Count -gt 0 )
         {
             ## we have to deal with a potential empty row
-            [string]$comment = $itemsCopy | Where-Object { $_.PSobject -and $_.PSObject.Properties -and  $_.PSObject.Properties[ 'ScreenPrimary' ] -and $_.ScreenPrimary -eq $row.ScreenPrimary -and $_.Width -eq $row.Width -and $_.Height -eq $row.Height `
+            [string]$comment = $itemsCopy | Where-Object { $_.PSobject -and $_.PSObject.Properties -and $_.PSObject.Properties[ 'ScreenPrimary' ] -and $_.ScreenPrimary -eq $row.ScreenPrimary -and $_.Width -eq $row.Width -and $_.Height -eq $row.Height `
                 -and $_.MonitorManufacturerName -eq $row.MonitorManufacturerName -and $_.MonitorManufacturerCode -eq $row.MonitorManufacturerCode -and $_.MonitorModel -eq $row.MonitorModel } | Select-Object -ExpandProperty Comment
             if( -Not [string]::IsNullOrEmpty( $comment ) )
             {
@@ -1257,46 +2052,153 @@ Function Add-VMwareVMsToListView
     {
         [void][Windows.MessageBox]::Show( $vmwareError , 'VMware Error' , 'Ok' ,'Error' )
     }
-    Write-Verbose -Message "Got $($vms.Count) powered on VMs"
+    Write-Verbose -Message "Got $($vms.Count) powered on VMware VMs"
     $WPFlistViewVMwareVMs.Items.Clear()
 
     ForEach( $vm in $vms )
     {
-        $WPFlistViewVMwareVMs.Items.Add( $vm.VmName )
+        $WPFlistViewVMwareVMs.Items.Add( [pscustomobject]@{ Name = $vm.VmName  } )
+        Write-Verbose -Message "Added $($vm.VmName)"
     }
     $WPFlabelVMwareVMs.Content = "$($WPFlistViewVMwareVMs.Items.Count) VMs"
 }
 
-Function Start-RemoteVMwareSession
+Function Add-HyperVVMsToListView
 {
     Param
     (
+        [string]$hyperVhost ,
+        [string]$filter ,
+        [bool]$regex ,
+        [bool]$allVMs
     )
-
-    if( $WPFlistViewVMwareVMs.SelectedIndex -ge 0 )
+    $hyperVError = $null
+    [string]$powerState = '.'
+    if( -Not $allVMs )
     {
-        if( $null -eq $script:vms -or $WPFlistViewVMwareVMs.SelectedIndex -gt $script:vms.Count )
+        $powerState = 'Running'
+    }
+    ## module qualifying in case clash with VMware PowerCLI. Deal with multiple hosts
+    $script:vms = @( Hyper-V\Get-VM -ErrorVariable hyperVError -ComputerName ($hyperVhost -split ',') | Where-Object { $_.State -match $powerState -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and $_.Name -like $filter )) } | Sort-Object -Property Name )
+    if( $hyperVError )
+    {
+        [void][Windows.MessageBox]::Show( $hyperVError , 'Hyper-V Error' , 'Ok' ,'Error' )
+    }
+    Write-Verbose -Message "Got $($vms.Count) powered on Hyper-V VMs"
+    $WPFlistViewHyperVVMs.Items.Clear()
+    ForEach( $vm in $vms )
+    {
+        $WPFlistViewHyperVVMs.Items.Add( [pscustomobject]@{ Name = $vm.Name ; PowerState = $vm.State } ) ## value comes from what is in Binding property for the grid view column
+    }
+    $WPFlabelHyperVVMs.Content = "$($WPFlistViewHyperVVMs.Items.Count) VMs"
+}
+
+## TODO make this generic for detecting which hypervisor is connected to and use that 
+
+Function Start-RemoteSessionFromHypervisor
+{
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('VMware','Hyper-V')]
+        [string]$hypervisorType ,
+        [switch]$console
+    )
+    [int]$loopIterations = 0
+    [string]$answer = $null
+    $listView = $WPFlistViewVMwareVMs
+    $radioButton = $WPFradioButtonVMwareConnectByIP
+    $rdpportTextbox = $WPFtextBoxVMwareRDPPort
+    if( $hypervisorType -ieq 'Hyper-V' )
+    {
+        $listView = $WPFlistViewHyperVVMs
+        $radioButton = $WPFradioButtonHyperVConnectByIP
+        $rdpportTextbox = $WPFtextBoxHyperVRDPPort
+    }
+    if( $listview.SelectedIndex -ge 0 )
+    {
+        if( $null -eq $script:vms -or $listView.SelectedIndex -gt $script:vms.Count )
         {
-            Write-Error -Message "Internal error : selected grid view index $($WPFlistViewVMwareVMs.SelectedIndex) greater than $(($script:vms|Measure-Object).Count)"
+            Write-Error -Message "Internal error : selected grid view index $($listView.SelectedIndex) greater than $(($script:vms|Measure-Object).Count)"]
+            return
         }
-        else
+        ForEach( $selection in $listView.selectedItems )
         {
-            $vm = $script:vms[ $WPFlistViewVMwareVMs.SelectedIndex ]
+            $loopIterations++
+            if( $hypervisorType -ieq 'Hyper-V' )
+            {
+                $vm = $script:vms | Where-Object Name -eq $selection.Name
+            }
+            else
+            {
+                $vm = $script:vms | Where-Object VMName -eq $selection.Name
+            }
+            if( $null -eq $vm )
+            {
+                Write-Warning "Could not find VM for selected item $($selection.Name) out of $($script:vms.Count)"
+                continue
+            }
+            if( $listview.selectedItems.Count -gt 1 -and ( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' ))
+            {
+                [string]$buttons = 'YesNoCancel'
+                [string]$prompt = "Are you sure you want to connect to $($listview.selectedItems.Count - $loopIterations + 1) VMs?`nYes for all , No for $($selection.Name) only or Cancel for none"
+                ## make it modal to the main window
+                $answer = [Windows.MessageBox]::Show( $mainWindow , $prompt , 'Confirm Multiple Connections' , $buttons ,'Question' )
+                if( $answer -ieq 'cancel' )
+                {
+                    return
+                }
+            }
             $address = $null
-            if( $WPFradioButtonConnectByIP.IsChecked )
+            
+            if( $console )
+            {
+                if( $hypervisorType -ieq 'Hyper-V' )
+                {
+                    ## TODO see if there is already a running process with these arguments (ish) and offer to activate that instead
+                    $consoleProcess = $null
+                    [hashtable]$consoleArguments = @{
+                        FilePath = 'vmconnect.exe' 
+                        ArgumentList = @( $WPFtextBoxHyperVHost.Text , "`"$($vm.Name)`"" , '-G' , $vm.Id )
+                        PassThru = $true
+                    }
+                    $consoleProcess = Start-Process @consoleArguments
+                    if( $null -eq $consoleProcess )
+                    {
+                        [void][Windows.MessageBox]::Show( "Failed to run $($consoleArguments[ 'filepath']) $($consoleArguments[ 'argumentlist' ] -join ' ') :`r`n$(Error[0])" , 'Hypervisor Console Error' , 'Ok' ,'Error' )
+                    }
+
+                }
+                else
+                {
+                    ## TODO launch VMware console - web or local app?
+                }
+            }
+            elseif( $radioButton.IsChecked )
             {
                 ## TODO do we allow IPv6 ?
-                $address = $vm.IPaddress | Where-Object { $_ -match '^\d+\.' -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notmatch '^169\.254\.' }
+                if( $hypervisorType -ieq 'vmware' )
+                {
+                    $address = $vm.IPaddress | Where-Object { $_ -match '^\d+\.' -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notmatch '^169\.254\.' }
+                }
+                else
+                {
+                    $address = Get-VMNetworkAdapter -VM $vm | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '^\d+\.' -and $_ -ne '127.0.0.1' -and $_ -ne '::1' -and $_ -notmatch '^169\.254\.' }
+                }
                 if( $null -eq $address )
                 {
-                    [void][Windows.MessageBox]::Show( "No IP address for $($vm.VmName)" , 'VMware Error' , 'Ok' ,'Error' )
+                    [void][Windows.MessageBox]::Show( "No IP address for $($vm.VmName)" , 'Hypervisor Error' , 'Ok' ,'Error' )
                 }
                 elseif( $address -is [array] -and $address.Count -gt 1 )
                 {
-                    [void][Windows.MessageBox]::Show( "$($address.Count) IP addresses for $($vm.VmName)" , 'VMware Error' , 'Ok' ,'Error' )
+                    [void][Windows.MessageBox]::Show( "$($address.Count) IP addresses for $($vm.VmName)" , 'Hypervisor Error' , 'Ok' ,'Error' )
                     ## TODO do we ask them to select one? Try in turn?
                     $address = $null
                 }
+            }
+            elseif( $hypervisorType -ieq 'Hyper-V' )
+            {
+                $address = $vm.Name
             }
             else
             {
@@ -1304,16 +2206,16 @@ Function Start-RemoteVMwareSession
             }
             if( $address )
             {
-                if( -Not [string]::IsNullOrEmpty( $WPFtextBoxVMwareRDPPort.Text ) )
+                if( -Not [string]::IsNullOrEmpty( $rdpportTextbox.Text ) )
                 {
-                    if( $WPFtextBoxVMwareRDPPort.Text -notmatch '^\d+$' )
+                    if( $rdpportTextbox.Text -notmatch '^\d+$' )
                     {
-                        [void][Windows.MessageBox]::Show( "Port `"$($WPFtextBoxVMwareRDPPort.Text)`" is invalid" , 'VMware Error' , 'Ok' ,'Error' )
+                        [void][Windows.MessageBox]::Show( "Port `"$($rdpportTextbox.Text)`" is invalid" , 'Hypervisor Error' , 'Ok' ,'Error' )
                         $address = $null
                     }
                     else
                     {
-                        $address = "$($address):$($WPFtextBoxVMwareRDPPort.Text)"
+                        $address = "$($address):$($rdpportTextbox.Text)"
                     }
                 }
                 Write-Verbose -Message "Connecting to VM $address"
@@ -1325,49 +2227,395 @@ Function Start-RemoteVMwareSession
                         $wpfcomboboxComputer.Items.Add( $address )
                     }
                     Set-RemoteSessionProperties -connectTo $address
+                    
+                    [bool]$alreadyPresent = $false
+
+                    ForEach( $item in $wpfcomboboxComputer.Items )
+                    {
+                        if( $alreadyPresent = $item -ieq $address )
+                        {
+                            break
+                        }
+                    }
+                    if( -not $alreadyPresent )
+                    {
+                        $wpfcomboboxComputer.Items.Insert( 0 , $address ) ## TODO should we resort it ? Need to check if already there
+                    }
                 }
                 else
                 {
-                    Write-Warning -Message "No address for VMware VM $($WPFlistViewVMwareVMs.SelectedItem)"
+                    Write-Warning -Message "No address for $hypervisorType VM $($listView.SelectedItem)"
                 }
             }
         }
     }
     else
     {
-        [void][Windows.MessageBox]::Show( "No VM selected" , 'VMware Error' , 'Ok' ,'Error' )
+        [void][Windows.MessageBox]::Show( "No VM selected" , "$hypervisorType Error" , 'Ok' ,'Error' )
     }
-    }
+}
     
 Function Process-Action
 {
     Param
     (
         $GUIobject , 
-        [string]$Operation ,
-        $context  ,
-        $thisObject
+        [string]$Operation 
+        ##$context  ,
+        ##$thisObject
     )
 
-    $_.Handled = $true
-    ## get selected item from control
+    $thisObject = $_
+
+    $thisObject.Handled = $true
+
+    Write-Verbose -Message "Process-Action $operation "
+
     if( $GUIobject )
-    {
-        [int]$selection = $GUIobject.selectedIndex
-        if( $selection -ge 0 )
+    {  
+        [array]$selectedVMs = @( $GUIobject.selectedItems )
+        if( $null -eq $selectedVMs -or $selectedVMs.Count -eq 0 )
         {
-            Write-Verbose -Message "Deleting computer $($GUIobject.SelectedItem)"
-            $GUIobject.Items.RemoveAt( $selection )
+            Write-Verbose -Message "No items selected"
+            [Windows.MessageBox]::Show( $mainWindow , 'No VMs selected' , 'Error' , 'OK' ,'Exclamation' )
+            return
+        }
+
+        [hashtable]$hypervParameters = @{}
+        if( -Not [string]::IsNullOrEmpty( $WPFtextBoxHyperVHost.Text ) )
+        {
+            $hypervParameters.Add( 'ComputerName' , $WPFtextBoxHyperVHost.Text.Trim() )
+        }
+        [string]$answer = $null
+        [int]$loopIterations = 0
+        [hashtable]$clipboardParameters = @{}
+
+        [array]$jobs = @( ForEach( $selection in $selectedVMs )
+        {
+            $loopIterations++
+            
+            if( $operation -match 'Hyper' )
+            {
+                $vm = $script:vms | Where-Object Name -eq $selection.Name
+            }
+            else
+            {
+                $vm = $script:vms | Where-Object VMName -eq $selection.Name
+            }
+            if( $null -eq $vm )
+            {
+                Write-Warning "Could not find VM for selected item $($selection.Name) out of $($script:vms.Count)"
+                ## might not be fatal as some operations don't use vm
+            }
+            if( $operation -ieq 'DeleteComputer' ) ## not Hyper-V context
+            {
+                Write-Verbose -Message "Deleting computer $selection"
+                $GUIobject.Items.RemoveAt( $selection )
+                continue
+            }
+            if( $Operation -match 'PowerOn|Detail|Resume|Clipboard|TakeSnapshot|((Manage|Revert|Delete).*Snapshot)' ) ## don't need to prompt or will prompt with more information later
+            {
+                $answer = 'yes'
+            }
+            elseif( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
+            {
+                [string]$buttons = 'YesNo'
+                [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
+                {
+                    "Are you sure you want to $($operation -replace '^HyperV_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($selection.Name) Only or Cancel for None"
+                    $buttons = 'YesNoCancel'
+                }
+                else
+                {
+                    "Are you sure you want to $($operation -replace '^HyperV_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selection.Name)?"
+                })
+                ## make it modal to the main window
+                $answer = [Windows.MessageBox]::Show( $mainWindow , $prompt , 'Confirm Power Operation' , $buttons ,'Question' )
+            }
+            if( [string]::IsNullOrEmpty( $answer ) -or $answer -ieq 'cancel' )
+            {
+                $answer = $null
+                break
+            }
+            ## else if $answer = no then we are just performing on this VM and will prompt again next time round this loop           
+            if( $operation -ieq 'NameToClipboard' )
+            {
+                $selection.Name | Set-Clipboard @clipboardParameters
+            }
+            elseif( $operation -ieq 'HyperV_PowerOn' )
+            {
+                Hyper-V\Start-VM -VMName $selection.Name -Passthru @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_Shutdown' )
+            {
+                Hyper-V\Stop-VM -VMName $selection.Name -Passthru @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_PowerOff' )
+            {
+                Hyper-V\Stop-VM -VMName $selection.Name -Passthru -TurnOff @hypervParameters -Force -Confirm:$false
+            }
+            elseif( $operation -ieq 'HyperV_Restart' )
+            {
+                Hyper-V\Restart-VM -VMName $selection.Name -Passthru @hypervParameters -Force -Confirm:$false
+            }
+            elseif( $operation -ieq 'HyperV_Resume' )
+            {
+                Hyper-V\Resume-VM -VMName $selection.Name -Passthru @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_Suspend' )
+            {
+                Hyper-V\Suspend-VM -VMName $selection.Name -Passthru @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_RevertLatestSnapshot' -or $operation -ieq 'HyperV_DeleteLatestSnapshot')
+            {
+                $latestCheckPoint = $null
+                $latestCheckPoint = Get-VMCheckpoint -VMName $selection.Name @hypervParameters | Sort-Object -Property CreationTime -Descending | Select-Object -First 1
+                if( $null -ne $latestCheckPoint )
+                {
+                    if( [Windows.MessageBox]::Show( $mainWindow , "$($latestCheckPoint.CreationTime.ToString('g')) : $($latestCheckPoint.Name)",
+                        "$(if( $operation -match 'delete' ) { 'Delete' } else { 'Restore' }) Snapshot on $($selection.Name)" , 'YesNoCancel' ,'Question' ) -ieq 'yes' )
+                    {
+                        ## do not need hypervparameters as cannot user -computername with a snapshot object as that contains the remote details
+                        if( $operation -match 'delete' )
+                        {
+                            Hyper-V\Remove-VMCheckpoint  -VMSnapshot $latestCheckPoint -Confirm:$false -Passthru
+                        }
+                        else
+                        {
+                            Hyper-V\Restore-VMCheckpoint -VMSnapshot $latestCheckPoint -Confirm:$false -Passthr
+                        }
+                    }
+                }
+                else
+                {
+                    Write-Warning -Message "No snapshots found for $($selection.Name)"
+                    ## TODO No snapshots message
+                }
+            }         
+            elseif( $operation -ieq 'HyperV_TakeSnapshot' )
+            {        
+                if( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML )
+                {
+                    $WPFbtnInputTextOk.Add_Click({ 
+                        $_.Handled = $true
+                        $textInputWindow.DialogResult = $true 
+                        $textInputWindow.Close()  })
+                    $textInputWindow.Title = "New Snapshot"
+                    $WPFlblInputTextLabel.Content = "Enter Snapshot Name"
+                    if( $textInputWindow.ShowDialog() )
+                    {
+                        [hashtable]$snapshotParameters = @{}
+                        if( $WPFtextboxInputText.Text.Length )
+                        {
+                            $snapshotParameters.Add( 'SnapshotName' , $WPFtextboxInputText.Text.Trim() )
+                        }
+                        Hyper-V\Checkpoint-VM -VMName $selection.Name -Passthru @hypervParameters @snapshotParameters
+                    }
+                }
+            }
+            elseif( $operation -ieq 'HyperV_Rename' )
+            {        
+                if( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML )
+                {
+                    $WPFbtnInputTextOk.Add_Click({ 
+                        $_.Handled = $true
+                        $textInputWindow.DialogResult = $true 
+                        $textInputWindow.Close()  })
+                    $textInputWindow.Title = "Rename $($selection.Name)"
+                    $WPFlblInputTextLabel.Content = "Enter New VM Name"
+                    if( $textInputWindow.ShowDialog() )
+                    {
+                        [string]$newname = $WPFtextboxInputText.Text.Trim().Trim('"')
+                        if( [string]::IsNullOrEmpty( $newname ) )
+                        {
+                            Write-Error "New name `"$newname`" too short"
+                        }
+                        else
+                        {
+                            if( $newname -ieq $selection.Name )
+                            {
+                                Write-Error "New name $newname is the same"
+                            }
+                            elseif( $null -ne ($existingVM = Hyper-V\Get-VM -Name $newname -ErrorAction SilentlyContinue @hypervParameters ) )
+                            {
+                                Write-Error "VM $newname already exists"
+                            }
+                            else
+                            {
+                                Hyper-V\Rename-VM -VM $vm -Passthru -NewName $newname
+                            }
+                        }
+                    }
+                }
+            }
+            elseif( $operation -ieq 'HyperV_ManageSnapshot' )
+            {
+                Show-SnapShotWindow -vm $selection.Name
+            }
+            elseif( $operation -ieq 'HyperV_Save' )
+            {
+                Hyper-V\Save-VM -VMName $selection.Name -Passthru @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_Delete' -or $operation -ieq 'HyperV_DeleteIncludingDisks' )
+            {
+                $disks = $null
+                if( $operation -ieq 'HyperV_DeleteIncludingDisks' )
+                {
+                    $disks = @( Hyper-V\Get-VMHardDiskDrive -VMName $selection.Name @hypervParameters )
+                    Write-Verbose -Message "Got $($disks.Count) disks for VM $($disks.VMName)"
+                }
+                $removal = $null
+                $removal = Hyper-V\Remove-VM -VMName $selection.Name -Passthru -Force -Confirm:$false @hypervParameters
+                if( $? -and $null -ne $removal )
+                {
+                    ForEach( $disk in $disks )
+                    {
+                        Write-Verbose -Message "Deleting disk $($disk.Path)"
+                        ## Could be remote so we use WMI with the CIM session in the disks object
+                        $file = $null
+                        ## needs backslashes escaping
+                        $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $disk.CimSession
+                        if( $null -ne $file )
+                        {
+                            Remove-CimInstance -InputObject $file -CimSession $disk.CimSession -Confirm:$false
+                        }
+                        else
+                        {
+                            Write-Warning -Message "Failed to get file for disk $($disk.Path)"
+                        }
+                    }
+                }
+                else
+                {
+                    Write-Verbose -Message "Not deleting disks for $($selection.Name) as deleting VM errored"
+                }
+            }
+            elseif( $operation -ieq 'HyperV_Detail' )
+            {
+                $details = $null
+                $details = Hyper-V\Get-VM -VMName $selection.Name @hypervParameters
+                if( $null -ne $details )
+                {
+                    [array]$hardDrives = @( Get-VMHardDiskDrive -VM $details )
+                    [string[]]$diskDetails = @( ForEach( $disk in $hardDrives )
+                    {
+                        [string]$size = ''
+                        $file = $null
+                        $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $disk.CimSession
+                        if( $null -ne $file )
+                        {
+                            $size = "$([math]::Round( $file.filesize / 1GB , 1 ))"
+                        }
+                        "$($disk.Path) ($($size) GB)"
+                    })
+                    [array]$snapshots = @( Get-VMSnapshot -VM $details | Sort-Object -Property CreationTime )
+                    [array]$NICs = @( Get-VMNetworkAdapter -VM $details )
+                    $form = New-Object System.Windows.Forms.Form
+                    $form.Text = $selection.Name
+                    $form.Size = New-Object System.Drawing.Size(800, 400)
+                    $form.StartPosition = "CenterScreen"
+
+                    $listView = New-Object System.Windows.Forms.ListView
+                    $listView.View = 'Details'
+                    $listView.FullRowSelect = $true
+                    $listView.GridLines = $true
+                    $listView.Dock = 'Fill'
+                    $listView.Columns.Add("Setting", 180)
+                    $listView.Columns.Add("Value", 600 )
+
+                    $data = @(
+                        @{ Setting = "Notes"; Value = $details.Notes }
+                        @{ Setting = "State"; Value = $details.State.ToString() }
+                        @{ Setting = "vCPU"; Value = $details.ProcessorCount }
+                        @{ Setting = "Resource Metering Enabled"; Value = $details.ResourceMeteringEnabled.ToString() }
+                        @{ Setting = "Uptime"; Value = $details.Uptime.ToString() }
+                        @{ Setting = "Version"; Value = $details.Version.ToString() }
+                        @{ Setting = "Memory Startup MB"; Value = $details.MemoryStartup / 1MB }
+                        @{ Setting = "Memory Assigned MB"; Value = $details.MemoryAssigned / 1MB }
+                        @{ Setting = "Memory Minimum MB"; Value = $details.MemoryMinimum / 1MB }
+                        @{ Setting = "Memory Maximum MB"; Value = $details.MemoryMaximum / 1MB }
+                        @{ Setting = "Dynamic Memory Enabled"; Value = $details.DynamicMemoryEnabled.ToString() }
+                        @{ Setting = "Hard Drives"; Value = $diskDetails -join "`n" }
+                        @{ Setting = "NICs"; Value = $NICs.Count }                        
+                        @{ Setting = "IP Addresses"; Value = ( $NICs | Select-Object -ExpandProperty IPAddresses -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
+                        @{ Setting = "Snapshots"; Value = $snapshots.Count }
+                        @{ Setting = "Created"; Value = $details.CreationTime.ToString('G') }
+                        @{ Setting = "Oldest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[0].CreationTime.ToString('G')) ($($snapshots[0].Name) ($($snapshots[0].Notes)))" })}
+                        @{ Setting = "Latest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[-1].CreationTime.ToString('G')) ($($snapshots[-1].Name) ($($snapshots[-1].Notes)))" })}  
+                    )
+
+                    foreach ($item in $data)
+                    {
+                        $listItem = New-Object System.Windows.Forms.ListViewItem($item.Setting)
+                        $listItem.SubItems.Add($item.Value)
+                        $null = $listView.Items.Add($listItem)
+                    }
+
+                    $form.Controls.Add($listView)
+                    $form.Add_Shown({ $form.Activate() })
+                    [void]$form.ShowDialog()
+
+                }
+                else
+                {
+                    ## TODO error dialogue
+                }
+            }
+            elseif( $operation -ieq 'HyperV_EnableResourceMetering' )
+            {
+                Hyper-V\Enable-VMResourceMetering -VMName $selection.Name @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_DisableResourceMetering' )
+            {
+                Hyper-V\Disable-VMResourceMetering -VMName $selection.Name @hypervParameters
+            }
+            elseif( $operation -ieq 'HyperV_DisConnectNIC' )
+            {
+                ## TODO what if more than one NIC?
+                Hyper-V\Disconnect-VMNetworkAdapter -VMName $selection.Name @hypervParameters
+            }
+            elseif( $operation -imatch 'HyperV_ConnectNIC*' )
+            {
+                [string]$switchType = $Operation -replace '^HyperV_ConnectNIC'
+                ## TODO need to get virtual switch names and if more than one prompt for the required one
+                [array]$switches = @( Hyper-V\Get-VMSwitch -SwitchType $switchType @hypervParameters )
+                if( $switches.Count -gt 1 )
+                {
+                    Write-Warning "VM $($selecion.Name) has $($switches.Count) NICs which isn't yet implemented sorry"
+                }
+                Hyper-V\Connect-VMNetworkAdapter -VMName $selection.Name -SwitchName $switches[ 0 ].Name @hypervParameters
+            }      
+            else
+            {
+                Write-Warning -Message "Unimplemented operation $Operation"
+            }
+            $clipboardParameters[ 'Append' ] = $true
+        })
+        if( $null -ne $jobs -and $jobs.count -gt 0 )
+        {
+            $jobs | Write-Verbose
         }
     }
 }
 
 #endregion pre-main
 
+
+if( [string]::IsNullOrEmpty( $tempFolder ) )
+{
+    Throw "No temp folder"
+}
+if( -Not ( Test-Path -Path $tempFolder -PathType Container ) -and -Not ( New-Item -Path $tempFolder -ItemType Directory -Force ) )
+{
+    Throw "Failed to create temp folder $tempFolder"
+}
+         
+<#
 if( $usemsrdc -and [string]::IsNullOrEmpty( $address ) )
 {
     Throw "Must specify computer to connect to via -address when using msrdc mode"
 }
+#>
 
 try
 {
@@ -1443,6 +2691,10 @@ if( $showManufacturerCodes )
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
    
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowRect(IntPtr hWnd, string lpString);
+   
         [DllImport("user32.dll", SetLastError=true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetWindowPos( IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -1490,11 +2742,14 @@ namespace Api
    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
    static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
    
+   [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+   public static extern int SetWindowText(IntPtr hWnd, string lpString );
+   
    [DllImport("user32.dll")]
    static extern bool IsWindowVisible(IntPtr hWnd);
    
-    [DllImport("user32.dll")]
-    public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
+   [DllImport("user32.dll")]
+   public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
  
    private static bool Callback(int hWnd, int pid)
    {
@@ -1633,15 +2888,33 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         $WPFbtnLaunchVMwareOptions.Add_Click({
             $_.Handled = $true
             Write-Verbose "Launch on VMware clicked"
-            Start-RemoteVMwareSession
+            Start-RemoteSessionFromHypervisor -hypervisorType VMware
+        })
+
+        $WPFbtnLaunchHyperVOptions.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Launch on Hyper-V clicked"
+            Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V
+        })
+        
+        $WPFbtnLaunchHyperVConsole.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Launch Console on Hyper-V clicked"
+            Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V -console
         })
 
         $WPFlistViewVMwareVMs.add_MouseDoubleClick({
             $_.Handled = $true
             Write-Verbose "Launch on VMware list item double clicked"
-            Start-RemoteVMwareSession
+            Start-RemoteSessionFromHypervisor -hypervisorType VMware
         })
         
+        $WPFlistViewHyperVVMs.add_MouseDoubleClick({
+            $_.Handled = $true
+            Write-Verbose "Launch on Hyper-V list item double clicked"
+            Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V
+        })
+
         $WPFbuttonVMwareConnect.Add_Click({
             $_.Handled = $true
             Write-Verbose "VMware Connect clicked"
@@ -1657,6 +2930,22 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Add-VMwareVMsToListView -filter $wpfTextBoxVMwareFilter.Text -regex $WPFcheckBoxVMwareRegEx.IsChecked
         })
         
+        $WPFbuttonHyperVConnect.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Hyper-V Connect clicked"
+            if( -Not [string]::IsNullOrEmpty( ( $hyperVhost = $WPFtextBoxHyperVHost.Text ) ))
+            {
+                Import-Module -Name Hyper-V
+            
+                Add-HyperVVMsToListView -hyperVhost $hyperVhost.Trim() -filter $wpfTextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -all $WPFcheckBoxHyperVAllVMs.IsChecked
+            }
+            ## else no host
+        })
+        
+        if( -Not [string]::IsNullOrEmpty( $hypervHost ) )
+        {
+            $WPFtextBoxHyperVHost.Text = $hypervHost
+        }
         $WPFbuttonVMwareDisconnect.Add_Click({
             $_.Handled = $true
             Write-Verbose "VMware Disconnect clicked"
@@ -1673,12 +2962,24 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             }
         })
 
-        $WPFbuttonApplyFilter.Add_Click({
+        $WPFbuttonVMwareApplyFilter.Add_Click({
             $_.Handled = $true
             Write-Verbose "VMware Apply Filter clicked"
             Add-VMwareVMsToListView -filter $wpfTextBoxVMwareFilter.Text -regex $WPFcheckBoxVMwareRegEx.IsChecked
         })
-
+        
+        $WPFbuttonHyperVApplyFilter.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Hyper-V Apply Filter clicked"
+            Add-HyperVVMsToListView -filter $WPFtextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -hyperVhost $WPFtextBoxHyperVHost.Text -all $WPFcheckBoxHyperVAllVMs.IsChecked
+        })
+        
+        $WPFbuttonHyperVClearFilter.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Hyper-V Clear Filter clicked"
+            $WPFtextBoxHyperVFilter.Text = ''
+            Add-HyperVVMsToListView -filter $WPFtextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -hyperVhost $WPFtextBoxHyperVHost.Text -all $WPFcheckBoxHyperVAllVMs.IsChecked
+        })
 
         $WPFdatagridDisplays.add_MouseDoubleClick({
             $_.Handled = $true
@@ -1740,9 +3041,41 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
                 $_.Source.WindowState = 'Normal'
             }
         })
+        
+        $WPFHyperVPowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOn' })
+        $WPFHyperVPowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOff' })
+        $WPFHyperVShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ShutDown' })
+        $WPFHyperVRestartContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Restart' })
+        $WPFHyperVDetailContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Detail' })
+        $WPFHyperVDeleteContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Delete' })
+        $WPFHyperVDeleteAllContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_DeleteIncludingDisks' })
+        
+        $WPFHyperVEjectCDContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_EjectCD' })
+        $WPFHyperVMountCDContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_MountCD' })
+        $WPFHyperVNameToClipboard.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'NameToClipboard' })
+        $WPFHyperVSaveContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Save' })
+        $WPFHyperVNewVMFromTemplateContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_New' })
+        $WPFHyperVNewVMContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_NewFromTemplate' })
+        $WPFHyperVReconfigureMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Reconfigure' })
+        $WPFHyperVConnectNICInternalContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ConnectNICInternal' })
+        $WPFHyperVConnectNICExternalContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ConnectNICExternal' })
+        $WPFHyperVConnectNICPrivateContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ConnectNICPrivate' })
+        $WPFHyperVDisconnectNICContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_DisconnectNIC' })
+        $WPFHyperVRenameMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Rename' })
+        $WPFHyperVSuspendContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Suspend' })
+        
+        $WPFHyperVResumeContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Resume' })
+        $WPFHyperVEnableResourceMeteringContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_EnableResourceMetering' })
+        $WPFHyperVDisableResourceMeteringContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_DisableResourceMetering' })
+        $WPFHyperVTakeSnapshotContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_TakeSnapshot' })
+        $WPFHyperVManageSnapshotContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ManageSnapshot' })
+        $WPFHyperVRevertLatestSnapshotContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_RevertLatestSnapshot' })
+        $WPFHyperVDeleteLatestSnapshotContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_DeleteLatestSnapshot' })
 
         $wpfchkboxDoNotApply.IsChecked = (-Not $useOtherOptions ) ## don't want it on by default as passes blank password to mstsc giving failed logon
 
+        $WPFchkboxmsrdc.IsChecked = $usemsrdc -or -Not [string]::IsNullOrEmpty( $msrdcCopyPath ) 
+        
         $guiResult = $mainWindow.ShowDialog()
 
         if( -Not [string]::IsNullOrEmpty( $WPFtxtBoxOtherOptions.Text ) -and -Not $wpfchkboxDoNotSave.IsChecked )
@@ -1758,6 +3091,13 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         }
 
         ## persist computers to registry
+        if( -Not (Test-Path -Path $configKey ) )
+        {
+            if( -Not ( New-Item -Path $configKey -ItemType Key -Force ) )
+            {
+                Write-Warning -Message "Problem creating $configKey"
+            }
+        }
         Set-ItemProperty -Path $configKey -Name Computers -Value ([string[]]@( $wpfcomboboxComputer.Items.GetEnumerator() | Sort-Object -Unique )) -Force
 
         exit $guiResult
@@ -1775,196 +3115,3 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
 }
 
 New-RemoteSession -rethrow
-
-# SIG # Begin signature block
-# MIIjcAYJKoZIhvcNAQcCoIIjYTCCI10CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
-# gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUg5+bTrUwZMC4KL93YFBLH9YR
-# gSaggh2OMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
-# AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
-# VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
-# IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
-# CQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cu
-# ZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3VyZWQgSUQg
-# Q29kZSBTaWduaW5nIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA
-# +NOzHH8OEa9ndwfTCzFJGc/Q+0WZsTrbRPV/5aid2zLXcep2nQUut4/6kkPApfmJ
-# 1DcZ17aq8JyGpdglrA55KDp+6dFn08b7KSfH03sjlOSRI5aQd4L5oYQjZhJUM1B0
-# sSgmuyRpwsJS8hRniolF1C2ho+mILCCVrhxKhwjfDPXiTWAYvqrEsq5wMWYzcT6s
-# cKKrzn/pfMuSoeU7MRzP6vIK5Fe7SrXpdOYr/mzLfnQ5Ng2Q7+S1TqSp6moKq4Tz
-# rGdOtcT3jNEgJSPrCGQ+UpbB8g8S9MWOD8Gi6CxR93O8vYWxYoNzQYIH5DiLanMg
-# 0A9kczyen6Yzqf0Z3yWT0QIDAQABo4IBzTCCAckwEgYDVR0TAQH/BAgwBgEB/wIB
-# ADAOBgNVHQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwMweQYIKwYBBQUH
-# AQEEbTBrMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQwYI
-# KwYBBQUHMAKGN2h0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEFz
-# c3VyZWRJRFJvb3RDQS5jcnQwgYEGA1UdHwR6MHgwOqA4oDaGNGh0dHA6Ly9jcmw0
-# LmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RDQS5jcmwwOqA4oDaG
-# NGh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RD
-# QS5jcmwwTwYDVR0gBEgwRjA4BgpghkgBhv1sAAIEMCowKAYIKwYBBQUHAgEWHGh0
-# dHBzOi8vd3d3LmRpZ2ljZXJ0LmNvbS9DUFMwCgYIYIZIAYb9bAMwHQYDVR0OBBYE
-# FFrEuXsqCqOl6nEDwGD5LfZldQ5YMB8GA1UdIwQYMBaAFEXroq/0ksuCMS1Ri6en
-# IZ3zbcgPMA0GCSqGSIb3DQEBCwUAA4IBAQA+7A1aJLPzItEVyCx8JSl2qB1dHC06
-# GsTvMGHXfgtg/cM9D8Svi/3vKt8gVTew4fbRknUPUbRupY5a4l4kgU4QpO4/cY5j
-# DhNLrddfRHnzNhQGivecRk5c/5CxGwcOkRX7uq+1UcKNJK4kxscnKqEpKBo6cSgC
-# PC6Ro8AlEeKcFEehemhor5unXCBc2XGxDI+7qPjFEmifz0DLQESlE/DmZAwlCEIy
-# sjaKJAL+L3J+HNdJRZboWR3p+nRka7LrZkPas7CM1ekN3fYBIM6ZMWM9CBoYs4Gb
-# T8aTEAb8B4H6i9r5gkn3Ym6hU/oSlBiFLpKR6mhsRDKyZqHnGKSaZFHvMIIFTzCC
-# BDegAwIBAgIQBP3jqtvdtaueQfTZ1SF1TjANBgkqhkiG9w0BAQsFADByMQswCQYD
-# VQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cuZGln
-# aWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2VydCBTSEEyIEFzc3VyZWQgSUQgQ29k
-# ZSBTaWduaW5nIENBMB4XDTIwMDcyMDAwMDAwMFoXDTIzMDcyNTEyMDAwMFowgYsx
-# CzAJBgNVBAYTAkdCMRIwEAYDVQQHEwlXYWtlZmllbGQxJjAkBgNVBAoTHVNlY3Vy
-# ZSBQbGF0Zm9ybSBTb2x1dGlvbnMgTHRkMRgwFgYDVQQLEw9TY3JpcHRpbmdIZWF2
-# ZW4xJjAkBgNVBAMTHVNlY3VyZSBQbGF0Zm9ybSBTb2x1dGlvbnMgTHRkMIIBIjAN
-# BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr20nXdaAALva07XZykpRlijxfIPk
-# TUQFAxQgXTW2G5Jc1YQfIYjIePC6oaD+3Zc2WN2Jrsc7bj5Qe5Nj4QHHHf3jopLy
-# g8jXl7Emt1mlyzUrtygoQ1XpBBXnv70dvZibro6dXmK8/M37w5pEAj/69+AYM7IO
-# Fz2CrTIrQjvwjELSOkZ2o+z+iqfax9Z1Tv82+yg9iDHnUxZWhaiEXk9BFRv9WYsz
-# qTXQTEhv8fmUI2aZX48so4mJhNGu7Vp1TGeCik1G959Qk7sFh3yvRugjY0IIXBXu
-# A+LRT00yjkgMe8XoDdaBoIn5y3ZrQ7bCVDjoTrcn/SqfHvhEEMj1a1f0zQIDAQAB
-# o4IBxTCCAcEwHwYDVR0jBBgwFoAUWsS5eyoKo6XqcQPAYPkt9mV1DlgwHQYDVR0O
-# BBYEFE16ovlqIk5uX2JQy6og0OCPrsnJMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUE
-# DDAKBggrBgEFBQcDAzB3BgNVHR8EcDBuMDWgM6Axhi9odHRwOi8vY3JsMy5kaWdp
-# Y2VydC5jb20vc2hhMi1hc3N1cmVkLWNzLWcxLmNybDA1oDOgMYYvaHR0cDovL2Ny
-# bDQuZGlnaWNlcnQuY29tL3NoYTItYXNzdXJlZC1jcy1nMS5jcmwwTAYDVR0gBEUw
-# QzA3BglghkgBhv1sAwEwKjAoBggrBgEFBQcCARYcaHR0cHM6Ly93d3cuZGlnaWNl
-# cnQuY29tL0NQUzAIBgZngQwBBAEwgYQGCCsGAQUFBwEBBHgwdjAkBggrBgEFBQcw
-# AYYYaHR0cDovL29jc3AuZGlnaWNlcnQuY29tME4GCCsGAQUFBzAChkJodHRwOi8v
-# Y2FjZXJ0cy5kaWdpY2VydC5jb20vRGlnaUNlcnRTSEEyQXNzdXJlZElEQ29kZVNp
-# Z25pbmdDQS5jcnQwDAYDVR0TAQH/BAIwADANBgkqhkiG9w0BAQsFAAOCAQEAU9zO
-# 9UpTkPL8DNrcbIaf1w736CgWB5KRQsmp1mhXbGECUCCpOCzlYFCSeiwH9MT0je3W
-# aYxWqIpUMvAI8ndFPVDp5RF+IJNifs+YuLBcSv1tilNY+kfa2OS20nFrbFfl9QbR
-# 4oacz8sBhhOXrYeUOU4sTHSPQjd3lpyhhZGNd3COvc2csk55JG/h2hR2fK+m4p7z
-# sszK+vfqEX9Ab/7gYMgSo65hhFMSWcvtNO325mAxHJYJ1k9XEUTmq828ZmfEeyMq
-# K9FlN5ykYJMWp/vK8w4c6WXbYCBXWL43jnPyKT4tpiOjWOI6g18JMdUxCG41Hawp
-# hH44QHzE1NPeC+1UjTCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFowDQYJ
-# KoZIhvcNAQEMBQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IElu
-# YzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNlcnQg
-# QXNzdXJlZCBJRCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIzNTk1
-# OVowYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
-# CxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBS
-# b290IEc0MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAv+aQc2jeu+Rd
-# SjwwIjBpM+zCpyUuySE98orYWcLhKac9WKt2ms2uexuEDcQwH/MbpDgW61bGl20d
-# q7J58soR0uRf1gU8Ug9SH8aeFaV+vp+pVxZZVXKvaJNwwrK6dZlqczKU0RBEEC7f
-# gvMHhOZ0O21x4i0MG+4g1ckgHWMpLc7sXk7Ik/ghYZs06wXGXuxbGrzryc/NrDRA
-# X7F6Zu53yEioZldXn1RYjgwrt0+nMNlW7sp7XeOtyU9e5TXnMcvak17cjo+A2raR
-# mECQecN4x7axxLVqGDgDEI3Y1DekLgV9iPWCPhCRcKtVgkEy19sEcypukQF8IUzU
-# vK4bA3VdeGbZOjFEmjNAvwjXWkmkwuapoGfdpCe8oU85tRFYF/ckXEaPZPfBaYh2
-# mHY9WV1CdoeJl2l6SPDgohIbZpp0yt5LHucOY67m1O+SkjqePdwA5EUlibaaRBkr
-# fsCUtNJhbesz2cXfSwQAzH0clcOP9yGyshG3u3/y1YxwLEFgqrFjGESVGnZifvaA
-# sPvoZKYz0YkH4b235kOkGLimdwHhD5QMIR2yVCkliWzlDlJRR3S+Jqy2QXXeeqxf
-# jT/JvNNBERJb5RBQ6zHFynIWIgnffEx1P2PsIV/EIFFrb7GrhotPwtZFX50g/KEe
-# xcCPorF+CiaZ9eRpL5gdLfXZqbId5RsCAwEAAaOCATowggE2MA8GA1UdEwEB/wQF
-# MAMBAf8wHQYDVR0OBBYEFOzX44LScV1kTN8uZz/nupiuHA9PMB8GA1UdIwQYMBaA
-# FEXroq/0ksuCMS1Ri6enIZ3zbcgPMA4GA1UdDwEB/wQEAwIBhjB5BggrBgEFBQcB
-# AQRtMGswJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2ljZXJ0LmNvbTBDBggr
-# BgEFBQcwAoY3aHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNz
-# dXJlZElEUm9vdENBLmNydDBFBgNVHR8EPjA8MDqgOKA2hjRodHRwOi8vY3JsMy5k
-# aWdpY2VydC5jb20vRGlnaUNlcnRBc3N1cmVkSURSb290Q0EuY3JsMBEGA1UdIAQK
-# MAgwBgYEVR0gADANBgkqhkiG9w0BAQwFAAOCAQEAcKC/Q1xV5zhfoKN0Gz22Ftf3
-# v1cHvZqsoYcs7IVeqRq7IviHGmlUIu2kiHdtvRoU9BNKei8ttzjv9P+Aufih9/Jy
-# 3iS8UgPITtAq3votVs/59PesMHqai7Je1M/RQ0SbQyHrlnKhSLSZy51PpwYDE3cn
-# RNTnf+hZqPC/Lwum6fI0POz3A8eHqNJMQBk1RmppVLC4oVaO7KTVPeix3P0c2PR3
-# WlxUjG/voVA9/HYJaISfb8rbII01YBwCA8sgsKxYoA5AY8WYIsGyWfVVa88nq2x2
-# zm8jLfR+cWojayL/ErhULSd+2DrZ8LaHlv1b0VysGMNNn3O3AamfV6peKOK5lDCC
-# Bq4wggSWoAMCAQICEAc2N7ckVHzYR6z9KGYqXlswDQYJKoZIhvcNAQELBQAwYjEL
-# MAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3
-# LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290IEc0
-# MB4XDTIyMDMyMzAwMDAwMFoXDTM3MDMyMjIzNTk1OVowYzELMAkGA1UEBhMCVVMx
-# FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVz
-# dGVkIEc0IFJTQTQwOTYgU0hBMjU2IFRpbWVTdGFtcGluZyBDQTCCAiIwDQYJKoZI
-# hvcNAQEBBQADggIPADCCAgoCggIBAMaGNQZJs8E9cklRVcclA8TykTepl1Gh1tKD
-# 0Z5Mom2gsMyD+Vr2EaFEFUJfpIjzaPp985yJC3+dH54PMx9QEwsmc5Zt+FeoAn39
-# Q7SE2hHxc7Gz7iuAhIoiGN/r2j3EF3+rGSs+QtxnjupRPfDWVtTnKC3r07G1decf
-# BmWNlCnT2exp39mQh0YAe9tEQYncfGpXevA3eZ9drMvohGS0UvJ2R/dhgxndX7RU
-# CyFobjchu0CsX7LeSn3O9TkSZ+8OpWNs5KbFHc02DVzV5huowWR0QKfAcsW6Th+x
-# tVhNef7Xj3OTrCw54qVI1vCwMROpVymWJy71h6aPTnYVVSZwmCZ/oBpHIEPjQ2OA
-# e3VuJyWQmDo4EbP29p7mO1vsgd4iFNmCKseSv6De4z6ic/rnH1pslPJSlRErWHRA
-# KKtzQ87fSqEcazjFKfPKqpZzQmiftkaznTqj1QPgv/CiPMpC3BhIfxQ0z9JMq++b
-# Pf4OuGQq+nUoJEHtQr8FnGZJUlD0UfM2SU2LINIsVzV5K6jzRWC8I41Y99xh3pP+
-# OcD5sjClTNfpmEpYPtMDiP6zj9NeS3YSUZPJjAw7W4oiqMEmCPkUEBIDfV8ju2Tj
-# Y+Cm4T72wnSyPx4JduyrXUZ14mCjWAkBKAAOhFTuzuldyF4wEr1GnrXTdrnSDmuZ
-# DNIztM2xAgMBAAGjggFdMIIBWTASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQW
-# BBS6FtltTYUvcyl2mi91jGogj57IbzAfBgNVHSMEGDAWgBTs1+OC0nFdZEzfLmc/
-# 57qYrhwPTzAOBgNVHQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwgwdwYI
-# KwYBBQUHAQEEazBpMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5j
-# b20wQQYIKwYBBQUHMAKGNWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdp
-# Q2VydFRydXN0ZWRSb290RzQuY3J0MEMGA1UdHwQ8MDowOKA2oDSGMmh0dHA6Ly9j
-# cmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3JsMCAGA1Ud
-# IAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwHATANBgkqhkiG9w0BAQsFAAOCAgEA
-# fVmOwJO2b5ipRCIBfmbW2CFC4bAYLhBNE88wU86/GPvHUF3iSyn7cIoNqilp/GnB
-# zx0H6T5gyNgL5Vxb122H+oQgJTQxZ822EpZvxFBMYh0MCIKoFr2pVs8Vc40BIiXO
-# lWk/R3f7cnQU1/+rT4osequFzUNf7WC2qk+RZp4snuCKrOX9jLxkJodskr2dfNBw
-# CnzvqLx1T7pa96kQsl3p/yhUifDVinF2ZdrM8HKjI/rAJ4JErpknG6skHibBt94q
-# 6/aesXmZgaNWhqsKRcnfxI2g55j7+6adcq/Ex8HBanHZxhOACcS2n82HhyS7T6NJ
-# uXdmkfFynOlLAlKnN36TU6w7HQhJD5TNOXrd/yVjmScsPT9rp/Fmw0HNT7ZAmyEh
-# QNC3EyTN3B14OuSereU0cZLXJmvkOHOrpgFPvT87eK1MrfvElXvtCl8zOYdBeHo4
-# 6Zzh3SP9HSjTx/no8Zhf+yvYfvJGnXUsHicsJttvFXseGYs2uJPU5vIXmVnKcPA3
-# v5gA3yAWTyf7YGcWoWa63VXAOimGsJigK+2VQbc61RWYMbRiCQ8KvYHZE/6/pNHz
-# V9m8BPqC3jLfBInwAM1dwvnQI38AC+R2AibZ8GV2QqYphwlHK+Z/GqSFD/yYlvZV
-# VCsfgPrA8g4r5db7qS9EFUrnEw4d2zc4GqEr9u3WfPwwggbAMIIEqKADAgECAhAM
-# TWlyS5T6PCpKPSkHgD1aMA0GCSqGSIb3DQEBCwUAMGMxCzAJBgNVBAYTAlVTMRcw
-# FQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UEAxMyRGlnaUNlcnQgVHJ1c3Rl
-# ZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBpbmcgQ0EwHhcNMjIwOTIxMDAw
-# MDAwWhcNMzMxMTIxMjM1OTU5WjBGMQswCQYDVQQGEwJVUzERMA8GA1UEChMIRGln
-# aUNlcnQxJDAiBgNVBAMTG0RpZ2lDZXJ0IFRpbWVzdGFtcCAyMDIyIC0gMjCCAiIw
-# DQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAM/spSY6xqnya7uNwQ2a26HoFIV0
-# MxomrNAcVR4eNm28klUMYfSdCXc9FZYIL2tkpP0GgxbXkZI4HDEClvtysZc6Va8z
-# 7GGK6aYo25BjXL2JU+A6LYyHQq4mpOS7eHi5ehbhVsbAumRTuyoW51BIu4hpDIjG
-# 8b7gL307scpTjUCDHufLckkoHkyAHoVW54Xt8mG8qjoHffarbuVm3eJc9S/tjdRN
-# lYRo44DLannR0hCRRinrPibytIzNTLlmyLuqUDgN5YyUXRlav/V7QG5vFqianJVH
-# hoV5PgxeZowaCiS+nKrSnLb3T254xCg/oxwPUAY3ugjZNaa1Htp4WB056PhMkRCW
-# fk3h3cKtpX74LRsf7CtGGKMZ9jn39cFPcS6JAxGiS7uYv/pP5Hs27wZE5FX/Nurl
-# fDHn88JSxOYWe1p+pSVz28BqmSEtY+VZ9U0vkB8nt9KrFOU4ZodRCGv7U0M50GT6
-# Vs/g9ArmFG1keLuY/ZTDcyHzL8IuINeBrNPxB9ThvdldS24xlCmL5kGkZZTAWOXl
-# LimQprdhZPrZIGwYUWC6poEPCSVT8b876asHDmoHOWIZydaFfxPZjXnPYsXs4Xu5
-# zGcTB5rBeO3GiMiwbjJ5xwtZg43G7vUsfHuOy2SJ8bHEuOdTXl9V0n0ZKVkDTvpd
-# 6kVzHIR+187i1Dp3AgMBAAGjggGLMIIBhzAOBgNVHQ8BAf8EBAMCB4AwDAYDVR0T
-# AQH/BAIwADAWBgNVHSUBAf8EDDAKBggrBgEFBQcDCDAgBgNVHSAEGTAXMAgGBmeB
-# DAEEAjALBglghkgBhv1sBwEwHwYDVR0jBBgwFoAUuhbZbU2FL3MpdpovdYxqII+e
-# yG8wHQYDVR0OBBYEFGKK3tBh/I8xFO2XC809KpQU31KcMFoGA1UdHwRTMFEwT6BN
-# oEuGSWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRHNFJT
-# QTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcmwwgZAGCCsGAQUFBwEBBIGDMIGA
-# MCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wWAYIKwYBBQUH
-# MAKGTGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRH
-# NFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcnQwDQYJKoZIhvcNAQELBQAD
-# ggIBAFWqKhrzRvN4Vzcw/HXjT9aFI/H8+ZU5myXm93KKmMN31GT8Ffs2wklRLHiI
-# Y1UJRjkA/GnUypsp+6M/wMkAmxMdsJiJ3HjyzXyFzVOdr2LiYWajFCpFh0qYQitQ
-# /Bu1nggwCfrkLdcJiXn5CeaIzn0buGqim8FTYAnoo7id160fHLjsmEHw9g6A++T/
-# 350Qp+sAul9Kjxo6UrTqvwlJFTU2WZoPVNKyG39+XgmtdlSKdG3K0gVnK3br/5iy
-# JpU4GYhEFOUKWaJr5yI+RCHSPxzAm+18SLLYkgyRTzxmlK9dAlPrnuKe5NMfhgFk
-# nADC6Vp0dQ094XmIvxwBl8kZI4DXNlpflhaxYwzGRkA7zl011Fk+Q5oYrsPJy8P7
-# mxNfarXH4PMFw1nfJ2Ir3kHJU7n/NBBn9iYymHv+XEKUgZSCnawKi8ZLFUrTmJBF
-# YDOA4CPe+AOk9kVH5c64A0JH6EE2cXet/aLol3ROLtoeHYxayB6a1cLwxiKoT5u9
-# 2ByaUcQvmvZfpyeXupYuhVfAYOd4Vn9q78KVmksRAsiCnMkaBXy6cbVOepls9Oie
-# 1FqYyJ+/jbsYXEP10Cro4mLueATbvdH7WwqocH7wl4R44wgDXUcsY6glOJcB0j86
-# 2uXl9uab3H4szP8XTE0AotjWAQ64i+7m4HJViSwnGWH2dwGMMYIFTDCCBUgCAQEw
-# gYYwcjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UE
-# CxMQd3d3LmRpZ2ljZXJ0LmNvbTExMC8GA1UEAxMoRGlnaUNlcnQgU0hBMiBBc3N1
-# cmVkIElEIENvZGUgU2lnbmluZyBDQQIQBP3jqtvdtaueQfTZ1SF1TjAJBgUrDgMC
-# GgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
-# KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG
-# 9w0BCQQxFgQUaCwktYV6stXM+spISF8+s6VbRIQwDQYJKoZIhvcNAQEBBQAEggEA
-# qVVe1MeAC/wcudk2QChLMHclKDmMn0qDHzGy/sGYNy7DMl/um54BwOQszrOZPv+1
-# cNpSRsta4TUixb6ySnp8Kr5p6ueuHyiiKBGZMd2MGYu5aJMuhQ90zmDnFtLtqYMY
-# vuMYihNivQ4q5a54oc6Acli84IF3Mvh3J/y1T2K+YAo/QD0CE9GeYI6Y39822e4w
-# MHHnEWiXqWjZH4AN2TC1suPP6H6zeQkJuGGh/QodCg6/371huX2cgLoOSVnPAZt6
-# /R5pW5KvyVvR/iwKzzrB5o8gJk4vJEW648dSvYvMNf8bga1CsNr/1ZPwx8Sfdu34
-# 1VkWoeAIEwaq0OLQ11ZdCqGCAyAwggMcBgkqhkiG9w0BCQYxggMNMIIDCQIBATB3
-# MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UE
-# AxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBp
-# bmcgQ0ECEAxNaXJLlPo8Kko9KQeAPVowDQYJYIZIAWUDBAIBBQCgaTAYBgkqhkiG
-# 9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMzAyMjQxMTA1Mzda
-# MC8GCSqGSIb3DQEJBDEiBCB53ZoYfHQ+Zu6HgC2wgDvbhl/gYqfaG+xU8Ik71j7U
-# ADANBgkqhkiG9w0BAQEFAASCAgCgQjOx49BIS8iDz5FyyFZ7S9YXVpA6Ar4vVE9B
-# 3vb2xi8hmkkhKl7U8pdsEQfaqO59eZENktdPm0X+0Ncfy9ZcC5BuHIy1ZnP4mx7M
-# Yd6m1KryY/s0rNuUWJSQjgDaWnQgcJCd2DyjOiq/f5HjzPt97/uEXxh6GFgCp3oN
-# QTvdEksrLZq/cpPqGOlhOPbILicNZKZ1C+Y27x3GMvI9snuU5YbUuPO5AVZFota7
-# s/z50Q3BHoBI/ToiwO/lOrCddfNen2KOAMpcxqvacxsxwfiEYSpOrK8kS8wRv+Y3
-# QmGQlgykmMT9DXVxO5B5kKEcXtjuKjqilNgctDBGbKxjZ1Z+4mq11YIWx+fNCk91
-# /zFBdjCkpUCi4alahzCSSE1ksPz117oHFtpR3RqLZ17jCbhSNNAlvi7/0pKtBZYo
-# 9NOfPgsbqz0uz2SM3hNh+gObVtWvJ1MrvKem3ZLvZhlaJ7Gc3UQ+KXJWPCrmx23a
-# +0TNropreWXWX2aEfbkvsrAEJ7010IX+Dc7Lt2NpVWv/DCNxnds6zBVpn5H9SIIp
-# H2SdIBtPgi0vgfiNU6NjaIgKUEFFz5MVjGZ69c9SE0UR/tqio5/Bop3f8hWub6rw
-# aTmsfrgtHZ82cB64b0wi9wHdbShEoJNtkU+fQxNrxWboFt8lNhvoDjBcQ1o/+O8E
-# Dm16Vw==
-# SIG # End signature block
