@@ -41,6 +41,7 @@
     2024/12/16 @guyrleech  Fixed VMware VM list not showing names
     2025/02/24 @guyrleech  Fixed snapshot issues
     2025/03/14 @guyrleech  Re-enable support for msrdc
+    2025/03/24 @guyrleech  msrdc (Windows (365) App, was Remote Desktop (store) app) autodetection and greyed out if not available
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -531,6 +532,76 @@ drivestoredirect:s:$drivesToRedirect
     'BOE' = 'BOE Technology'
  }
  
+ Function Get-Msrdc
+ {
+    [string]$msrdc = $null
+
+    if( -Not [string]::IsNullOrEmpty( $msrdcCopyPath ) )
+    {
+        $exe = $msrdcCopyPath
+    }
+    elseif( -Not ( Get-Command -Name ($exe = 'msrdc.exe') -CommandType Application -ErrorAction SilentlyContinue ) )
+    {
+        if( $apppathskey = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msrdc.exe' -ErrorAction SilentlyContinue ) 
+        {
+            if( $apppathskey.psobject.Properties[ '(default)' ] )
+            {
+                $exe = $apppathskey.'(default)'
+            }
+            elseif( $apppathskey.psobject.Properties[ 'path' ] )
+            {
+                $exe = Join-Path -Path $apppathskey.path -ChildPath 'msrdc.exe'
+            }
+            else
+            {
+                Throw "App Paths key found for msrdc.exe but it contains no usable paths"
+            }
+        }
+        elseif( $installPath = Get-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\* | Where-Object { $_.PSObject.Properties[ 'DisplayName' ] -and $_.DisplayName -eq 'Remote Desktop' -and $_.Publisher -eq 'Microsoft Corporation' } | Select-Object -ExpandProperty InstallLocation )
+        {
+            $exe = Join-Path -Path $installPath -ChildPath 'msrdc.exe'
+        }
+        elseif( $appx = Get-AppxPackage -Name '*.Windows365' | Sort-Object -Property Version -Descending | Select-Object -First 1 )
+        {
+            ## cannot execute it directly from here so we take a copy (hopefully Ivanti Application Control's Trusted Ownership won't bite us :-) )
+            [string]$copyToFolder = $msrdcCopyFolder
+            if( [string]::IsNullOrEmpty( $copyToFolder ) )
+            {
+                $copyToFolder = [System.IO.Path]::Combine( $env:LOCALAPPDATA , 'Programs' , $msrdcCopyName )
+            }
+            if( -Not (Test-Path -Path $copyToFolder) )
+            {
+                New-Item -Path $copyToFolder -ItemType Directory -Force ## if it errors, so be it
+            }
+            $appxMsrdcVersion = Get-ItemProperty -Path ( Join-Path $appx.InstallLocation -ChildPath 'msrdc\msrdc.exe' ) | Select-Object -ExpandProperty VersionInfo | Select-Object -ExpandProperty FileVersionRaw
+            if( -Not ( $copyProperties = Get-ItemProperty -Path (Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe') -ErrorAction SilentlyContinue) -or $appxMsrdcVersion -gt $copyProperties.VersionInfo.FileVersionRaw ) 
+            {
+                Write-Verbose "Copying from $($appx.InstallLocation ) to $copyToFolder"
+                Copy-Item -Path (Join-Path $appx.InstallLocation -ChildPath 'msrdc\*') -Destination $copyToFolder -Recurse -Force
+            }
+            else
+            {
+                Write-Verbose -Message "msrdc copy folder `"$copyToFolder`" already exists"
+            }
+            $exe = Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe' 
+        }
+        else
+        {
+            $exe = [System.IO.Path]::Combine( ([Environment]::GetFolderPath( [Environment+SpecialFolder]::ProgramFiles )) , 'Remote Desktop' , 'msrdc.exe' )
+            if( -Not ( Test-Path -Path $exe -PathType Leaf ) )
+            {
+                $exe = [System.IO.Path]::Combine( ([Environment]::GetFolderPath( [Environment+SpecialFolder]::ProgramFilesX86 )) , 'Remote Desktop' , 'msrdc.exe' )
+                ## TODO what if per user install?
+            }
+        }
+    }
+
+    if( -Not [string]::IsNullOrEmpty( $exe ) -and ( Test-Path -Path $exe -PathType Leaf -ErrorAction SilentlyContinue ) )
+    {
+        $exe ## return
+    }
+}
+
 Function Set-WindowToFront
 {
     Param
@@ -1174,65 +1245,7 @@ Function New-RemoteSession
 
         if( $usemsrdc )
         {
-            if( -Not [string]::IsNullOrEmpty( $msrdcCopyPath ) )
-            {
-                $exe = $msrdcCopyPath
-            }
-            elseif( -Not ( Get-Command -Name ($exe = 'msrdc.exe') -CommandType Application -ErrorAction SilentlyContinue ) )
-            {
-                if( $apppathskey = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msrdc.exe' -ErrorAction SilentlyContinue ) 
-                {
-                    if( $apppathskey.psobject.Properties[ '(default)' ] )
-                    {
-                        $exe = $apppathskey.'(default)'
-                    }
-                    elseif( $apppathskey.psobject.Properties[ 'path' ] )
-                    {
-                        $exe = Join-Path -Path $apppathskey.path -ChildPath 'msrdc.exe'
-                    }
-                    else
-                    {
-                        Throw "App Paths key found for msrdc.exe but it contains no usable paths"
-                    }
-                }
-                elseif( $installPath = Get-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\* | Where-Object { $_.PSObject.Properties[ 'DisplayName' ] -and $_.DisplayName -eq 'Remote Desktop' -and $_.Publisher -eq 'Microsoft Corporation' } | Select-Object -ExpandProperty InstallLocation )
-                {
-                    $exe = Join-Path -Path $installPath -ChildPath 'msrdc.exe'
-                }
-                elseif( $appx = Get-AppxPackage -Name '*.Windows365' | Sort-Object -Property Version -Descending | Select-Object -First 1 )
-                {
-                    ## cannot execute it directly from here so we take a copy (hopefully Ivanti Application Control's Trusted Ownership won't bite us :-) )
-                    [string]$copyToFolder = $msrdcCopyFolder
-                    if( [string]::IsNullOrEmpty( $copyToFolder ) )
-                    {
-                        $copyToFolder = [System.IO.Path]::Combine( $env:LOCALAPPDATA , 'Programs' , $msrdcCopyName )
-                    }
-                    if( -Not (Test-Path -Path $copyToFolder) )
-                    {
-                        New-Item -Path $copyToFolder -ItemType Directory -Force ## if it errors, so be it
-                    }
-                    $appxMsrdcVersion = Get-ItemProperty -Path ( Join-Path $appx.InstallLocation -ChildPath 'msrdc\msrdc.exe' ) | Select-Object -ExpandProperty VersionInfo | Select-Object -ExpandProperty FileVersionRaw
-                    if( -Not ( $copyProperties = Get-ItemProperty -Path (Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe') -ErrorAction SilentlyContinue) -or $appxMsrdcVersion -gt $copyProperties.VersionInfo.FileVersionRaw ) 
-                    {
-                        Write-Verbose "Copying from $($appx.InstallLocation ) to $copyToFolder"
-                        Copy-Item -Path (Join-Path $appx.InstallLocation -ChildPath 'msrdc\*') -Destination $copyToFolder -Recurse -Force
-                    }
-                    else
-                    {
-                        Write-Verbose -Message "msrdc copy folder `"$copyToFolder`" already exists"
-                    }
-                    $exe = Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe' 
-                }
-                else
-                {
-                    $exe = [System.IO.Path]::Combine( ([Environment]::GetFolderPath( [Environment+SpecialFolder]::ProgramFiles )) , 'Remote Desktop' , 'msrdc.exe' )
-                    if( -Not ( Test-Path -Path $exe -PathType Leaf ) )
-                    {
-                        $exe = [System.IO.Path]::Combine( ([Environment]::GetFolderPath( [Environment+SpecialFolder]::ProgramFilesX86 )) , 'Remote Desktop' , 'msrdc.exe' )
-                        ## TODO what if per user install?
-                    }
-                }
-            }
+           $exe = Get-Msrdc
             
             if( [string]::IsNullOrEmpty( $remoteDesktopName ))
             {
@@ -3074,7 +3087,9 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
 
         $wpfchkboxDoNotApply.IsChecked = (-Not $useOtherOptions ) ## don't want it on by default as passes blank password to mstsc giving failed logon
 
-        $WPFchkboxmsrdc.IsChecked = $usemsrdc -or -Not [string]::IsNullOrEmpty( $msrdcCopyPath ) 
+        [string]$msrdcExe = Get-Msrdc
+        $WPFchkboxmsrdc.IsEnabled = -Not [string]::IsNullOrEmpty( $msrdcExe )
+        $WPFchkboxmsrdc.IsChecked = $usemsrdc -or -Not [string]::IsNullOrEmpty($msrdcExe ) 
         
         $guiResult = $mainWindow.ShowDialog()
 
