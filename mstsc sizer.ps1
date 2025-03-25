@@ -42,6 +42,7 @@
     2025/02/24 @guyrleech  Fixed snapshot issues
     2025/03/14 @guyrleech  Re-enable support for msrdc
     2025/03/24 @guyrleech  msrdc (Windows (365) App, was Remote Desktop (store) app) autodetection and greyed out if not available
+    2025/03/25 @guyrleech  No Hyper-V host specified causes it to use localhost
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -393,6 +394,35 @@ drivestoredirect:s:$drivesToRedirect
                     <RadioButton x:Name="radioButtonHyperVConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
                     <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="154" Grid.Column="1" Margin="97,122,0,0" />
                     <TextBox x:Name="textBoxHyperVHost" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
+                </Grid>
+            </TabItem>
+            <TabItem Header="Active Directory" IsEnabled="false">
+                <Grid x:Name="ActiveDirectory" Margin="55,0,409,0" Height="342"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="129*"/>
+                        <ColumnDefinition Width="140*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="btnLaunchADOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24" IsDefault="True"/>
+                    <ListView x:Name="listViewAD" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Multiple" >
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}"/>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                    <Label x:Name="labelADVMs" Content="VMs" HorizontalAlignment="Center" Height="29" Margin="0,5,0,0" VerticalAlignment="Top" Width="122"/>
+                    <Label Content="Filter" HorizontalAlignment="Left" Height="29" Margin="94,2,0,0" VerticalAlignment="Top" Width="123" Grid.Column="1"/>
+                    <CheckBox x:Name="checkBoxADRegEx" Content="RegEx" Height="29" Width="93" Grid.Column="1" Margin="304,41,-255,272" IsChecked="True"/>
+                    <TextBox x:Name="textBoxADFilter" TextWrapping="Wrap" Grid.Column="1" Margin="94,39,-143,275" />
+                    <Button x:Name="buttonADApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
+                    <Label Content="vCenter" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="100,226,0,0" />
+                    <TextBox x:Name="textBoxADRDPPort" TextWrapping="Wrap" Height="28" Width="189" Grid.Column="1" Margin="102,156,-136,158" />
+                    <Button x:Name="buttonADConnect" Content="_Connect" Height="31" Width="117" Grid.Column="1" Margin="102,301,-64,10"/>
+                    <RadioButton x:Name="radioButtonADConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
+                    <RadioButton x:Name="radioButtonADConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
+                    <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="97,122,0,0" />
+                    <TextBox x:Name="textBoxADvCenter" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
+                    <Button x:Name="buttonADDisconnect" Content="_Disconnect" Height="31" Width="117" Grid.Column="1" Margin="240,301,-202,10"/>
                 </Grid>
             </TabItem>
         </TabControl>
@@ -2095,7 +2125,7 @@ Function Add-HyperVVMsToListView
     $script:vms = @( Hyper-V\Get-VM -ErrorVariable hyperVError -ComputerName ($hyperVhost -split ',') | Where-Object { $_.State -match $powerState -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and $_.Name -like $filter )) } | Sort-Object -Property Name )
     if( $hyperVError )
     {
-        [void][Windows.MessageBox]::Show( $hyperVError , 'Hyper-V Error' , 'Ok' ,'Error' )
+        [void][Windows.MessageBox]::Show( $hyperVError , "Hyper-V Error from $hyperVhost" , 'Ok' ,'Error' )
     }
     Write-Verbose -Message "Got $($vms.Count) powered on Hyper-V VMs"
     $WPFlistViewHyperVVMs.Items.Clear()
@@ -2946,13 +2976,14 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         $WPFbuttonHyperVConnect.Add_Click({
             $_.Handled = $true
             Write-Verbose "Hyper-V Connect clicked"
-            if( -Not [string]::IsNullOrEmpty( ( $hyperVhost = $WPFtextBoxHyperVHost.Text ) ))
+            $hyperVhost = $WPFtextBoxHyperVHost.Text.Trim() -replace '"'
+            if( [string]::IsNullOrEmpty( $hyperVhost ) )
             {
-                Import-Module -Name Hyper-V
-            
-                Add-HyperVVMsToListView -hyperVhost $hyperVhost.Trim() -filter $wpfTextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -all $WPFcheckBoxHyperVAllVMs.IsChecked
+                $hyperVhost = 'localhost'
             }
-            ## else no host
+            Import-Module -Name Hyper-V
+            
+            Add-HyperVVMsToListView -hyperVhost $hyperVhost -filter $wpfTextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -all $WPFcheckBoxHyperVAllVMs.IsChecked
         })
         
         if( -Not [string]::IsNullOrEmpty( $hypervHost ) )
