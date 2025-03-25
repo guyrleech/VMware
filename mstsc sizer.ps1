@@ -214,51 +214,150 @@ drivestoredirect:s:$drivesToRedirect
         mc:Ignorable="d"
         Title="Guy's mstsc Wrapper Script" Height="500" Width="809">
     <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-        <TabControl HorizontalAlignment="Stretch" Height="432" VerticalAlignment="Stretch" Width="768">
+        <TabControl HorizontalAlignment="Stretch" Height="450" VerticalAlignment="Stretch" Width="768">
             <TabItem Header="Main">
-                <Grid  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="23*"/>
-                        <ColumnDefinition Width="50*"/>
-                        <ColumnDefinition Width="103*"/>
-                        <ColumnDefinition Width="68*"/>
-                        <ColumnDefinition Width="518*"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Grid.ColumnSpan="5" Height="110" Margin="15,10,-160,0" VerticalAlignment="Top" Width="907">
-                        <DataGrid x:Name="datagridDisplays" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" SelectionMode="Single" />
-                    </StackPanel>
-                    <Label Content="Computer" HorizontalAlignment="Left" Height="38" Margin="14,132,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
-                    <CheckBox x:Name="chkboxmsrdc" Grid.Column="4" Content="Use msrdc instead of mstsc" HorizontalAlignment="Left" Height="21" Margin="145,189,0,0" VerticalAlignment="Top" Width="292" IsEnabled="true"/>
-                    <ComboBox x:Name="comboboxComputer" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,137,0,0" VerticalAlignment="Top" Width="254" IsEditable="True" IsDropDownOpen="False" Grid.ColumnSpan="3">
-                        <ComboBox.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="Delete" x:Name="deleteComputersContextMenu"/>
-                            </ContextMenu>
-                        </ComboBox.ContextMenu>
-                    </ComboBox>
-                    <CheckBox x:Name="chkboxPrimary" Grid.Column="4" Content="Use primary monitor" HorizontalAlignment="Left" Height="21" Margin="145,215,0,0" VerticalAlignment="Top" Width="292"/>
-                    <TextBox x:Name="txtboxDrivesToRedirect" Grid.Column="2" HorizontalAlignment="Left" Height="26" Margin="14,230,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="254" Text="*" Grid.ColumnSpan="3"/>
-                    <Label Content="Drive&#xA;Redirection" HorizontalAlignment="Left" Height="46" Margin="14,220,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
-                    <CheckBox x:Name="chkboxNoMove" Grid.Column="4" Content="Do not move window" HorizontalAlignment="Left" Height="21" Margin="145,245,0,0" VerticalAlignment="Top" Width="292"/>
-                    <RadioButton x:Name="radioFullScreen" Grid.Column="4" Content="Fullscreen" HorizontalAlignment="Left" Height="24" Margin="145,296,0,0" VerticalAlignment="Top" Width="206" GroupName="WindowSize"/>
-                    <RadioButton x:Name="radioPercentage" Grid.Column="4" Content="Screen Percentage (X:Y)" HorizontalAlignment="Left" Height="24" Margin="145,272,0,0" VerticalAlignment="Top" Width="206" GroupName="WindowSize"/>
-                    <RadioButton x:Name="radioWidthHeight" Grid.Column="4" Content="Width &amp; Height" HorizontalAlignment="Left" Height="24" Margin="145,324,0,0" VerticalAlignment="Top" Width="206" GroupName="WindowSize" />
-                    <TextBox x:Name="txtboxWindowPosition" Grid.Column="2" HorizontalAlignment="Left" Height="26" Margin="14,283,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="254" Text="0,0" Grid.ColumnSpan="3"/>
-                    <Label Content="Window&#xA;Position" HorizontalAlignment="Left" Height="46" Margin="14,273,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
-                    <TextBox x:Name="txtboxScreenPercentage" Grid.Column="4" HorizontalAlignment="Left" Height="23" Margin="314,273,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="158"/>
-                    <TextBox x:Name="txtboxWidthHeight" Grid.Column="4" HorizontalAlignment="Left" Height="23" Margin="314,319,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="158">
+            <Grid>
+               <StackPanel Orientation="Vertical">
+                  <StackPanel Width="Auto" Margin="10 10 0 0" VerticalAlignment="Top">
+                     <DataGrid
+                        x:Name="datagridDisplays"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        ScrollViewer.CanContentScroll="True"
+                        ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                        ScrollViewer.VerticalScrollBarVisibility="Auto"
+                        SelectionMode="Single"/>
+                     <StackPanel Orientation="Horizontal">
+                        <StackPanel Margin="0 30 0 0" Orientation="Horizontal">
+                           <Label Height="40" Margin="0 10 0 0" Content="Computer"/>
+                           <ComboBox
+                              x:Name="comboboxComputer"
+                              Width="250"
+                              Height="35"
+                              Margin="12 0 0 0"
+                              IsDropDownOpen="False"
+                              IsEditable="True">
+                              <ComboBox.ContextMenu>
+                                 <ContextMenu>
+                                    <MenuItem x:Name="deleteComputersContextMenu" Header="Delete"/>
+                                 </ContextMenu>
+                              </ComboBox.ContextMenu>
+                           </ComboBox>
+                        </StackPanel>
+                        <StackPanel Margin="40 40 0 0" Orientation="Vertical">
+                           <CheckBox
+                              x:Name="chkboxmsrdc"
+                              Width="292"
+                              Height="21"
+                              Content="Use msrdc instead of mstsc"
+                              IsEnabled="true"/>
+                           <CheckBox
+                              x:Name="chkboxPrimary"
+                              Width="292"
+                              Height="21"
+                              Grid.Column="4"
+                              HorizontalAlignment="Left"
+                              VerticalAlignment="Top"
+                              Content="Use primary monitor"/>
+                           <CheckBox
+                              x:Name="chkboxNoMove"
+                              Width="292"
+                              Height="21"
+                              Content="Do not move window"/>
+                        </StackPanel>
+                     </StackPanel>
+                     <StackPanel Orientation="Horizontal">
+                        <StackPanel Orientation="Horizontal">
+                           <Label Height="40" Content="User"/>
+                           <TextBox
+                              x:Name="textboxUsername"
+                              Width="250"
+                              Height="35"
+                              Margin="42 0 0 0 "
+                              VerticalAlignment="Top"/>
+                        </StackPanel>
+                        <StackPanel Margin="40 0 0 0" Orientation="Vertical">
+                           <RadioButton
+                              x:Name="radioFullScreen"
+                              Margin="-160 0 0 0"
+                              Width="206"
+                              Height="24"
+                              VerticalAlignment="Top"
+                              Content="Fullscreen"
+                              GroupName="WindowSize"/>
+                           <StackPanel Orientation="Horizontal">   
+                           <RadioButton
+                              x:Name="radioPercentage"
+                              Width="206"
+                              Height="24"
+                              VerticalAlignment="Top"
+                              Content="Screen Percentage (X:Y)"
+                              GroupName="WindowSize"/>
+                               <TextBox x:Name="txtboxScreenPercentage" Height="23"  TextWrapping="Wrap"  Width="158"/>
+
+                              </StackPanel>
+                              <StackPanel Orientation="Horizontal" Margin=" 0 5 0 0">
+                              <RadioButton
+                              x:Name="radioWidthHeight"
+                              Width="206"
+                              Height="24"
+                              VerticalAlignment="Top"
+                              Content="Width Height"
+                              GroupName="WindowSize"/>
+                          <TextBox x:Name="txtboxWidthHeight" HorizontalAlignment="Left" Height="23"  TextWrapping="Wrap" VerticalAlignment="Top" Width="158">
                         <TextBox.InputBindings>
                             <MouseBinding Gesture="LeftDoubleClick" />
                         </TextBox.InputBindings>
                     </TextBox>
-                    <RadioButton x:Name="radioFillScreen" Grid.Column="4" Content="Fill Screen" HorizontalAlignment="Left" Height="24" Margin="145,348,0,0" VerticalAlignment="Top" Width="206" GroupName="WindowSize"/>
-                    <Button x:Name="btnLaunch" Content="_Launch" Grid.ColumnSpan="2" HorizontalAlignment="Left" Height="25" Margin="2,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="1"/>
-                    <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="25" Margin="71,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="2" Grid.ColumnSpan="2"/>
-                    <Button x:Name="btnCreateShortcut" Content="_Create Shortcut" HorizontalAlignment="Left" Height="25" Margin="14,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="4"/>
-                    <Label Content="User" HorizontalAlignment="Left" Height="38" Margin="14,181,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
-                    <TextBox x:Name="textboxUsername" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,186,0,0" VerticalAlignment="Top" Width="254" Grid.ColumnSpan="3"/>
-                </Grid>
-            </TabItem>
+
+                              </StackPanel>
+                           
+                           <RadioButton
+                              x:Name="radioFillScreen"
+                              Width="206"
+                              Height="24"
+                              Grid.Column="4"
+                              HorizontalAlignment="Left"
+                              VerticalAlignment="Top"
+                              Content="Fill Screen"
+                              GroupName="WindowSize"/>
+                        </StackPanel>
+                     </StackPanel>
+                     <StackPanel Margin="0 -40 0 0" Orientation="Horizontal">
+                    <Label Content="Drive&#xA;Redirection" HorizontalAlignment="Left" Height="46" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
+                        <TextBox
+                           x:Name="txtboxDrivesToRedirect"
+                           Width="250"
+                           Height="35"
+                           Grid.Column="2"
+                           HorizontalAlignment="Left"
+                           Margin="5 0 0 0"
+                           VerticalAlignment="Top"
+                           Text="*"
+                           TextWrapping="Wrap"/>
+                     </StackPanel>
+                     <StackPanel Orientation="Horizontal" Margin="0 10 0 0 ">
+                    <Label Content="Window&#xA;Position" HorizontalAlignment="Left" Height="46" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
+                        <TextBox
+                           x:Name="txtboxWindowPosition"
+                           Width="254"
+                           Height="35"
+                           HorizontalAlignment="Left"
+                           Margin="4 0 0 0"
+                           VerticalAlignment="Top"
+                           Text="0,0"
+                           TextWrapping="Wrap"/>
+                     </StackPanel>
+                  </StackPanel>
+                  <StackPanel Orientation="Horizontal" Margin="30 0 0 0">
+                    <Button x:Name="btnLaunch" Content="_Launch" Margin="5" Grid.ColumnSpan="2" HorizontalAlignment="Left" Height="25"  VerticalAlignment="Bottom" Width="96" Grid.Column="1"/>
+                    <Button x:Name="btnRefresh" Content="_Refresh" Margin="5" HorizontalAlignment="Left" Height="25"  VerticalAlignment="Bottom" Width="96" Grid.Column="2" Grid.ColumnSpan="2"/>
+                    <Button x:Name="btnCreateShortcut"  Margin="5" Content="_Create Shortcut" HorizontalAlignment="Left" Height="25"  VerticalAlignment="Bottom" Width="96" Grid.Column="4"/>
+
+                  </StackPanel>
+               </StackPanel>
+            </Grid>
+         </TabItem>
             <TabItem Header="Mstsc Options">
                 <Grid Margin="0,0,100,100   " Grid.Column="1" Height="200"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
