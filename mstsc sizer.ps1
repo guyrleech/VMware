@@ -43,6 +43,8 @@
     2025/03/14 @guyrleech  Re-enable support for msrdc
     2025/03/24 @guyrleech  msrdc (Windows (365) App, was Remote Desktop (store) app) autodetection and greyed out if not available
     2025/03/25 @guyrleech  No Hyper-V host specified causes it to use localhost
+    2025/03/26 @guyrleech  Added prompts to shutdown running VM before taking snapshot and to start after taking snapshot
+                           Added nested virtualistion enablement
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -346,6 +348,7 @@ drivestoredirect:s:$drivesToRedirect
                                     <MenuItem Header="Detail" x:Name="HyperVDetailContextMenu" />
                                     <MenuItem Header="Rename" x:Name="HyperVRenameMenu" />
                                     <MenuItem Header="Reconfigure" x:Name="HyperVReconfigureMenu" />
+                                    <MenuItem Header="Enable Nested Virtualisation" x:Name="HyperVEnableNestedVirtualisationContextMenu" />
                                     <MenuItem Header="Enable Resource Metering" x:Name="HyperVEnableResourceMeteringContextMenu" />
                                     <MenuItem Header="Performance Data" x:Name="HyperVMeasureContextMenu" />
                                     <MenuItem Header="Disable Resource Metering" x:Name="HyperVDisableResourceMeteringContextMenu" />
@@ -2445,6 +2448,18 @@ Function Process-Action
                         $textInputWindow.Close()  })
                     $textInputWindow.Title = "New Snapshot"
                     $WPFlblInputTextLabel.Content = "Enter Snapshot Name"
+                    if( $vm -and $vm.State -ieq 'Running' )
+                    {
+                        $response = [Windows.MessageBox]::Show( $mainWindow , "Uptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
+                        if( $response -ieq 'Cancel' )
+                        {
+                            return
+                        }
+                        elseif( $response -ieq 'yes' )
+                        {
+                            Hyper-V\Stop-VM -VM $VM -TurnOff ## syncrhonous
+                        }
+                    }
                     if( $textInputWindow.ShowDialog() )
                     {
                         [hashtable]$snapshotParameters = @{}
@@ -2452,7 +2467,14 @@ Function Process-Action
                         {
                             $snapshotParameters.Add( 'SnapshotName' , $WPFtextboxInputText.Text.Trim() )
                         }
+                        
                         Hyper-V\Checkpoint-VM -VMName $selection.Name -Passthru @hypervParameters @snapshotParameters
+                        $checkpointStatus = $?
+                        $response = [Windows.MessageBox]::Show( $mainWindow , "Snapshot $(if( $checkpointStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name) after restore" , 'YesNo' ,'Question' )
+                        if( $response -ieq 'yes' )
+                        {
+                            Hyper-V\Start-VM -VM $VM -AsJob
+                        }
                     }
                 }
             }
@@ -2589,9 +2611,13 @@ Function Process-Action
 
                     foreach ($item in $data)
                     {
+                    try {
                         $listItem = New-Object System.Windows.Forms.ListViewItem($item.Setting)
                         $listItem.SubItems.Add($item.Value)
                         $null = $listView.Items.Add($listItem)
+                    } catch {
+                        Write-Warning "Exception adding $($item.value) to list view: $_"
+                    }
                     }
 
                     $form.Controls.Add($listView)
@@ -2602,6 +2628,28 @@ Function Process-Action
                 else
                 {
                     ## TODO error dialogue
+                }
+            }
+            elseif( $Operation -ieq 'HyperV_EnableNestedVirtualisation' )
+            {
+                if( $vm -and $vm.State -ieq 'Running' )
+                {
+                    $response = [Windows.MessageBox]::Show( $mainWindow , "VM cannot be running`nUptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
+                    if( $response -ieq 'Cancel' )
+                    {
+                        return
+                    }
+                    elseif( $response -ieq 'yes' )
+                    {
+                        Hyper-V\Stop-VM -VM $VM -TurnOff ## syncrhonous
+                    }
+                }
+                Set-VMProcessor -VM $vm -ExposeVirtualizationExtensions $true
+                $configChangeStatus = $?
+                $response = [Windows.MessageBox]::Show( $mainWindow , "Change $(if( $configChangeStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name)" , 'YesNo' ,'Question' )
+                if( $response -ieq 'yes' )
+                {
+                    Hyper-V\Start-VM -VM $VM -AsJob
                 }
             }
             elseif( $operation -ieq 'HyperV_EnableResourceMetering' )
@@ -3109,6 +3157,7 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         $WPFHyperVSuspendContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Suspend' })
         
         $WPFHyperVResumeContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Resume' })
+        $WPFHyperVEnableNestedVirtualisationContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_EnableNestedVirtualisation' })
         $WPFHyperVEnableResourceMeteringContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_EnableResourceMetering' })
         $WPFHyperVDisableResourceMeteringContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_DisableResourceMetering' })
         $WPFHyperVTakeSnapshotContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_TakeSnapshot' })
