@@ -45,6 +45,7 @@
     2025/03/25 @guyrleech  No Hyper-V host specified causes it to use localhost
     2025/03/26 @guyrleech  Added prompts to shutdown running VM before taking snapshot and to start after taking snapshot
                            Added nested virtualistion enablement
+    2025/03/27 @guyrleech  Added message box for error if msrdc copy errors
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -610,7 +611,13 @@ drivestoredirect:s:$drivesToRedirect
             if( -Not ( $copyProperties = Get-ItemProperty -Path (Join-Path -Path $copyToFolder -ChildPath 'msrdc.exe') -ErrorAction SilentlyContinue) -or $appxMsrdcVersion -gt $copyProperties.VersionInfo.FileVersionRaw ) 
             {
                 Write-Verbose "Copying from $($appx.InstallLocation ) to $copyToFolder"
-                Copy-Item -Path (Join-Path $appx.InstallLocation -ChildPath 'msrdc\*') -Destination $copyToFolder -Recurse -Force
+                $copyErrors = $null
+                Copy-Item -Path (Join-Path $appx.InstallLocation -ChildPath 'msrdc\*') -Destination $copyToFolder -Recurse -Force -ErrorVariable copyErrors
+                if( -Not $? )
+                {
+                    [void][Windows.MessageBox]::Show( "Errors copying msrdc`n$($copyErrors -join "`n")", 'Error Copying msrdc' , 'Ok' ,'Error' )
+                    ## TODO we could use a different folder but would have to change logic to find it.
+                }
             }
             else
             {
