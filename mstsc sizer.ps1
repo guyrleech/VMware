@@ -46,12 +46,15 @@
     2025/03/26 @guyrleech  Added prompts to shutdown running VM before taking snapshot and to start after taking snapshot
                            Added nested virtualistion enablement
     2025/03/27 @guyrleech  Added message box for error if msrdc copy errors
+    2025/04/09 @guyrleech  Added Buy Me A Coffee button
+    2025/09/23 @guyrleech  Removed Hyper-V Connect button as Apply Filter does the same
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
     ## TODO add history tab which is disabled by default (and thus audit)
     ## TODO add VMware console to that tab, make mstsc.exe configurable so could use with other exes
     ## TODO can we embed mstsx ax control so we can resize windows natively without mstsc.exe etc?
+    ## TODO implement persistent tags so can make comments on machines in grid view. Persist to file so could be on a share
 
 #>
 
@@ -111,6 +114,8 @@ Param
 [array]$script:vms = $null
 $script:vmwareConnection = $null
 [array]$script:theseSnapshots = @()
+$script:remoteSession = $null
+$script:credentials = $null
 
 # keep user added comments so can set when displays change
 ##$script:itemscopy = New-Object -TypeName System.Collections.Generic.List[object]
@@ -129,84 +134,6 @@ smart sizing:i:0
 drivestoredirect:s:$drivesToRedirect
 '@
 
-<#  from ChatGPT after asking it to make it resize properly
-
-<Window x:Class="mstsc_msrdc_wrapper.MainWindow"
-        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Guy's mstsc Wrapper Script" Height="500" Width="809">
-    <Grid>
-        <TabControl HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-            <TabItem Header="Main">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-
-                    <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="10">
-                        <Label Content="Computer" VerticalAlignment="Center" />
-                        <ComboBox x:Name="comboboxComputer" Width="200" Margin="10,0,0,0" IsEditable="True" />
-                        <CheckBox x:Name="chkboxPrimary" Content="Use primary monitor" Margin="10,0,0,0" VerticalAlignment="Center" />
-                    </StackPanel>
-
-                    <DataGrid x:Name="datagridDisplays" Grid.Row="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Margin="10" SelectionMode="Single" />
-
-                    <StackPanel Orientation="Horizontal" Grid.Row="2" HorizontalAlignment="Center" Margin="10">
-                        <Button x:Name="btnLaunch" Content="_Launch" Width="96" Margin="5" />
-                        <Button x:Name="btnRefresh" Content="_Refresh" Width="96" Margin="5" />
-                        <Button x:Name="btnCreateShortcut" Content="_Create Shortcut" Width="96" Margin="5" />
-                    </StackPanel>
-                </Grid>
-            </TabItem>
-
-            <TabItem Header="Hyper-V">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-
-                    <Label Content="VMs" Grid.Row="0" HorizontalAlignment="Center" Margin="10" />
-
-                    <ListView x:Name="listViewHyperVVMs" Grid.Row="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Margin="10" SelectionMode="Multiple">
-                        <ListView.View>
-                            <GridView>
-                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" />
-                                <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}" />
-                            </GridView>
-                        </ListView.View>
-                        <ListView.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="Power" x:Name="PowerContextMenu">
-                                    <MenuItem Header="Power On" x:Name="HyperVPowerOnContextMenu" />
-                                    <MenuItem Header="Power Off" x:Name="HyperVPowerOffContextMenu" />
-                                </MenuItem>
-                                <MenuItem Header="Config" x:Name="ConfigContextMenu">
-                                    <MenuItem Header="Detail" x:Name="HyperVDetailContextMenu" />
-                                    <MenuItem Header="Rename" x:Name="HyperVRenameMenu" />
-                                </MenuItem>
-                            </ContextMenu>
-                        </ListView.ContextMenu>
-                    </ListView>
-
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="10">
-                        <Button x:Name="btnLaunchHyperVOptions" Content="_Launch" Width="96" Margin="5" />
-                        <Button x:Name="btnLaunchHyperVConsole" Content="Console" Width="96" Margin="5" />
-                    </StackPanel>
-                </Grid>
-            </TabItem>
-        </TabControl>
-    </Grid>
-</Window>
-@'
-
-#>
-
-#>
-
 [string]$mainwindowXAML = @'
 <Window x:Class="mstsc_msrdc_wrapper.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -217,7 +144,8 @@ drivestoredirect:s:$drivesToRedirect
         mc:Ignorable="d"
         Title="Guy's mstsc Wrapper Script" Height="500" Width="809">
     <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-        <TabControl HorizontalAlignment="Stretch" Height="432" VerticalAlignment="Stretch" Width="768">
+        <TabControl HorizontalAlignment="Stretch" VerticalAlignment="Stretch" x:Name="tabControl" >
+        
             <TabItem Header="Main">
                 <Grid  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
@@ -263,7 +191,7 @@ drivestoredirect:s:$drivesToRedirect
                 </Grid>
             </TabItem>
             <TabItem Header="Mstsc Options">
-                <Grid Margin="0,0,100,100   " Grid.Column="1" Height="200"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                <Grid Margin="0,0,100,100   " Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="214*"/>
                         <ColumnDefinition Width="53*"/>
@@ -278,7 +206,7 @@ drivestoredirect:s:$drivesToRedirect
                 </Grid>
             </TabItem>
             <TabItem Header="Other Options">
-                <Grid x:Name="OtherRDPOptions" Margin="55,0,528,0" Height="309"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                <Grid x:Name="OtherRDPOptions" Margin="55,0,528,0"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="146*"/>
                         <ColumnDefinition Width="33*"/>
@@ -290,53 +218,89 @@ drivestoredirect:s:$drivesToRedirect
                     <Button x:Name="btnLaunchOtherOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-19" IsDefault="True"/>
                 </Grid>
             </TabItem>
-            <TabItem Header="VMware">
-                <Grid x:Name="VMwareOptions" Margin="55,0,409,0" Height="342"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+            <TabItem Header="VMware" x:Name="tabVMware">
+                 <Grid x:Name="gridVMware" Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="129*"/>
-                        <ColumnDefinition Width="140*"/>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="btnLaunchVMwareOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24" IsDefault="True"/>
-                    <ListView x:Name="listViewVMwareVMs" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Multiple" >
+                    
+                    <ListView x:Name="listViewVMwareVMs" Grid.Row="2" Grid.ColumnSpan="4" Margin="5" VerticalAlignment="Stretch" SelectionMode="Multiple">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}"/>
                             </GridView>
                         </ListView.View>
                     </ListView>
-                    <Label x:Name="labelVMwareVMs" Content="VMs" HorizontalAlignment="Center" Height="29" Margin="0,5,0,0" VerticalAlignment="Top" Width="122"/>
-                    <Label Content="Filter" HorizontalAlignment="Left" Height="29" Margin="94,2,0,0" VerticalAlignment="Top" Width="123" Grid.Column="1"/>
-                    <CheckBox x:Name="checkBoxVMwareRegEx" Content="RegEx" Height="29" Width="93" Grid.Column="1" Margin="304,41,-255,272" IsChecked="True"/>
-                    <TextBox x:Name="textBoxVMwareFilter" TextWrapping="Wrap" Grid.Column="1" Margin="94,39,-143,275" />
-                    <Button x:Name="buttonVMwareApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
-                    <Label Content="vCenter" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="100,226,0,0" />
-                    <TextBox x:Name="textBoxVMwareRDPPort" TextWrapping="Wrap" Height="28" Width="189" Grid.Column="1" Margin="102,156,-136,158" />
-                    <Button x:Name="buttonVMwareConnect" Content="_Connect" Height="31" Width="117" Grid.Column="1" Margin="102,301,-64,10"/>
-                    <RadioButton x:Name="radioButtonVMwareConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
-                    <RadioButton x:Name="radioButtonVMwareConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
-                    <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="97,122,0,0" />
-                    <TextBox x:Name="textBoxVMwarevCenter" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
-                    <Button x:Name="buttonVMwareDisconnect" Content="_Disconnect" Height="31" Width="117" Grid.Column="1" Margin="240,301,-202,10"/>
+                    
+                    <TextBox x:Name="textBoxVMwarevCenter" Grid.Row="1" Grid.Column="0" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+                    <Label x:Name="labelVMwareVMs" Content="0 VMs" Grid.Row="1" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5"/>
+                    <Label Content="Filter" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5"/>
+                    <CheckBox x:Name="checkBoxVMwareRegEx" Content="RegE_x" Grid.Row="1" Grid.Column="1" Margin="5,40,0,0" VerticalAlignment="Top"/>
+                    <TextBox x:Name="textBoxVMwareFilter"  Grid.Row="1" Grid.Column="1" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+                    <Label Content="vCenter" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <RadioButton x:Name="radioButtonVMwareConnectByIP" Content="Connect by _IP" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0"  GroupName="GroupBy"/>
+                    <RadioButton x:Name="radioButtonVMwareConnectByName"   Content="Connect by _Name" Grid.Row="1" Grid.Column="3" Margin="5,70,0,0"  GroupName="GroupBy" IsChecked="True"/>
+                    <Label Content="RDP Port" Grid.Row="0" Grid.Column="3" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxVMwareRDPPort" Grid.Row="1" Grid.Column="3" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top"  />
+
+                    <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="5">
+                        <Button x:Name="buttonVMwareConnect" Content="_Connect" Width="100" Margin="5" />
+                        <Button x:Name="buttonVMwareDisconnect" Content="_Disconnect" Width="100" Margin="5" />
+                        <Button x:Name="btnLaunchVMwareOptions" Content="_Launch" Width="100" Margin="5" />
+                        <Button x:Name="buttonVMwareApplyFilter" Content="Apply _Filter" Width="100" Margin="5" />
+                    </StackPanel>
                 </Grid>
             </TabItem>
-            <TabItem Header="Hyper-V">
-                <Grid x:Name="HyperVOptions" Margin="55,0,409,0" Height="342"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+
+            <TabItem Header="Hyper-V" x:Name="tabHyperV">
+                <Grid x:Name="HyperVOptions" Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="160*"/>
-                        <ColumnDefinition Width="160*"/>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="btnLaunchHyperVOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24" IsDefault="True"/>
-                    <Button x:Name="btnLaunchHyperVConsole" Content="C_onsole" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24"  Grid.Column="2" IsDefault="False"/>
-                    <ListView x:Name="listViewHyperVVMs" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Multiple" >
+
+                    <Label Content="Host" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxHyperVHost" Grid.Row="1" Grid.Column="0" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+
+                    <Label x:Name="labelHyperVVMs" Content="0 VMs" Grid.Row="1" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <Label Content="Filter" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxHyperVFilter" Grid.Row="1" Grid.Column="1" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+                    <CheckBox x:Name="checkBoxHyperVRegEx" Content="RegE_x" Grid.Row="1" Grid.Column="1" Margin="5,40,0,0" VerticalAlignment="Top" />
+                    <CheckBox x:Name="checkBoxHyperVAllVMs" Content="_All VMs" Grid.Row="1" Grid.Column="1" Margin="5,70,0,0" VerticalAlignment="Top" />
+
+                    <RadioButton x:Name="radioButtonHyperVConnectByIP" Content="Connect by _IP" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0"  GroupName="GroupBy"/>
+                    <RadioButton x:Name="radioButtonHyperVConnectByName"   Content="Connect by _Name" Grid.Row="1" Grid.Column="3" Margin="5,70,0,0"  GroupName="GroupBy" IsChecked="True"/>
+
+                    <Label Content="RDP Port" Grid.Row="0" Grid.Column="3" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxHyperVRDPPort" Grid.Row="1" Grid.Column="3" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+
+                    <ListView x:Name="listViewHyperVVMs" Grid.Row="2" Grid.ColumnSpan="4" Margin="5" VerticalAlignment="Stretch" SelectionMode="Multiple">
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}"/>
-                                <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}"/>
+                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" />
+                                <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}" />
                             </GridView>
                         </ListView.View>
                         <ListView.ContextMenu>
                             <ContextMenu>
-                                <MenuItem Header="Power" x:Name="PowerContextMenu" >
+                                <MenuItem Header="Power" x:Name="PowerContextMenu">
                                     <MenuItem Header="Power On" x:Name="HyperVPowerOnContextMenu" />
                                     <MenuItem Header="Power Off" x:Name="HyperVPowerOffContextMenu" />
                                     <MenuItem Header="Shutdown" x:Name="HyperVShutdownContextMenu" />
@@ -345,7 +309,8 @@ drivestoredirect:s:$drivesToRedirect
                                     <MenuItem Header="Save" x:Name="HyperVSaveContextMenu" />
                                     <MenuItem Header="Suspend" x:Name="HyperVSuspendContextMenu" />
                                 </MenuItem>
-                                <MenuItem Header="Config" x:Name="ConfigContextMenu" >
+                                <MenuItem Header="Config" x:Name="ConfigContextMenu">
+                                    <MenuItem Header="Run" x:Name="HyperVRunContextMenu" />
                                     <MenuItem Header="Detail" x:Name="HyperVDetailContextMenu" />
                                     <MenuItem Header="Rename" x:Name="HyperVRenameMenu" />
                                     <MenuItem Header="Reconfigure" x:Name="HyperVReconfigureMenu" />
@@ -354,79 +319,99 @@ drivestoredirect:s:$drivesToRedirect
                                     <MenuItem Header="Performance Data" x:Name="HyperVMeasureContextMenu" />
                                     <MenuItem Header="Disable Resource Metering" x:Name="HyperVDisableResourceMeteringContextMenu" />
                                 </MenuItem>
-                                <MenuItem Header="Delete" x:Name="DeletionContextMenu" >
+                                <MenuItem Header="Delete" x:Name="DeletionContextMenu">
                                     <MenuItem Header="Delete VM" x:Name="HyperVDeleteContextMenu" />
                                     <MenuItem Header="Delete VM + Disks" x:Name="HyperVDeleteAllContextMenu" />
                                 </MenuItem>
-                                <MenuItem Header="CD" x:Name="CDContextMenu" >
+                                <MenuItem Header="CD" x:Name="CDContextMenu">
                                     <MenuItem Header="Mount" x:Name="HyperVMountCDContextMenu" />
                                     <MenuItem Header="Eject" x:Name="HyperVEjectCDContextMenu" />
                                 </MenuItem>
-                                <MenuItem Header="Snapshots" x:Name="SnapshotsContextMenu" >
+                                <MenuItem Header="Snapshots" x:Name="SnapshotsContextMenu">
                                     <MenuItem Header="Manage" x:Name="HyperVManageSnapshotContextMenu" />
                                     <MenuItem Header="Take Snapshot" x:Name="HyperVTakeSnapshotContextMenu" />
                                     <MenuItem Header="Revert to Latest Snapshot" x:Name="HyperVRevertLatestSnapshotContextMenu" />
                                     <MenuItem Header="Delete Latest Snapshot" x:Name="HyperVDeleteLatestSnapshotContextMenu" />
                                 </MenuItem>
-                                <MenuItem Header="New" x:Name="NewContextMenu" >
+                                <MenuItem Header="New" x:Name="NewContextMenu">
                                     <MenuItem Header="Brand New" x:Name="HyperVNewVMContextMenu" />
                                     <MenuItem Header="Templated" x:Name="HyperVNewVMFromTemplateContextMenu" />
                                 </MenuItem>
                                 <MenuItem Header="Name to Clipboard" x:Name="HyperVNameToClipboard" />
-                                <MenuItem Header="NICS" x:Name="NICSContextMenu" >
+                                <MenuItem Header="NICS" x:Name="NICSContextMenu">
                                     <MenuItem Header="Disconnect NIC" x:Name="HyperVDisconnectNICContextMenu" />
-                                    <MenuItem Header="Connect To" x:Name="ConnectNICContextMenu" >
+                                    <MenuItem Header="Connect To" x:Name="ConnectNICContextMenu">
                                         <MenuItem Header="Internal" x:Name="HyperVConnectNICInternalContextMenu" />
                                         <MenuItem Header="External" x:Name="HyperVConnectNICExternalContextMenu" />
-                                        <MenuItem Header="Private"  x:Name="HyperVConnectNICPrivateContextMenu" />
+                                        <MenuItem Header="Private" x:Name="HyperVConnectNICPrivateContextMenu" />
                                     </MenuItem>
                                 </MenuItem>
                             </ContextMenu>
                         </ListView.ContextMenu>
                     </ListView>
-                    <Label x:Name="labelHyperVVMs" Content="VMs" HorizontalAlignment="Center" Height="29" Margin="0,5,0,0" VerticalAlignment="Top" Width="122"/>
-                    <Label Content="Filter" HorizontalAlignment="Left" Height="29" Margin="94,2,0,0" VerticalAlignment="Top" Width="40" Grid.Column="1"/>
-                    <CheckBox x:Name="checkBoxHyperVRegEx" Content="RegE_x" Height="29" Width="93" Grid.Column="1" Margin="304,35,-255,272" IsChecked="True"/>
-                    <CheckBox x:Name="checkBoxHyperVAllVMs" Content="_All VMs" Height="29" Width="93" Grid.Column="2" Margin="304,55,-255,272" IsChecked="False"/>
-                    <TextBox x:Name="textBoxHyperVFilter" TextWrapping="Wrap" Grid.Column="1" Margin="94,39,-143,275" />
-                    <Button x:Name="buttonHyperVApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
-                    <Button x:Name="buttonHyperVClearFilter" Content="Clea_r Filter" Height="31" Width="117" Grid.Column="1" Margin="240,86,-202,225"/>
-                    <Label Content="Host" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="100,226,0,0" />
-                    <TextBox x:Name="textBoxHyperVRDPPort" TextWrapping="Wrap" Height="28" Width="189" Grid.Column="1" Margin="102,156,-136,158" />
-                    <Button x:Name="buttonHyperVConnect" Content="_Connect" Height="31" Width="117" Grid.Column="1" Margin="102,301,-64,10"/>
-                    <RadioButton x:Name="radioButtonHyperVConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
-                    <RadioButton x:Name="radioButtonHyperVConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
-                    <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="154" Grid.Column="1" Margin="97,122,0,0" />
-                    <TextBox x:Name="textBoxHyperVHost" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
+
+                    <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="5">
+                        <Button x:Name="btnLaunchHyperVOptions" Content="_Launch" Width="100" Margin="5" />
+                        <Button x:Name="btnLaunchHyperVConsole" Content="C_onsole" Width="100" Margin="5" />
+                      <!-- Apply Filter does the same  <Button x:Name="btnConnectHyperV" Content="_Connect" Width="100" Margin="5" />   -->
+                        <Button x:Name="buttonHyperVApplyFilter" Content="Apply _Filter" Width="100" Margin="5" />
+                        <Button x:Name="buttonHyperVClearFilter" Content="Clea_r Filter" Width="100" Margin="5" />
+                        <Button x:Name="buttonHyperBuyMeACoffee" Cursor="Pen" ToolTip="Buy me a coffee!">
+                            <Viewbox Stretch="Uniform">
+                                <Image x:Name="CoffeeImage" Stretch="Fill"/>
+                            </Viewbox>
+                        </Button>
+                    </StackPanel>
                 </Grid>
             </TabItem>
-            <TabItem Header="Active Directory" IsEnabled="false">
-                <Grid x:Name="ActiveDirectory" Margin="55,0,409,0" Height="342"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+            <TabItem Header="Active Directory" x:Name="tabActiveDirectory" IsEnabled="true">
+            
+                 <Grid x:Name="gridActiveDirectory" Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="129*"/>
-                        <ColumnDefinition Width="140*"/>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="btnLaunchADOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-24" IsDefault="True"/>
-                    <ListView x:Name="listViewAD" Grid.ColumnSpan="2" Height="293" Margin="10,39,70,0" VerticalAlignment="Top" SelectionMode="Multiple" >
+                    
+                    <ListView x:Name="listViewAD" Grid.Row="3" Grid.ColumnSpan="4" Margin="5" VerticalAlignment="Stretch" SelectionMode="Multiple">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}"/>
+                                <GridViewColumn Header="Container" DisplayMemberBinding="{Binding Container}"/>
                             </GridView>
                         </ListView.View>
                     </ListView>
-                    <Label x:Name="labelADVMs" Content="VMs" HorizontalAlignment="Center" Height="29" Margin="0,5,0,0" VerticalAlignment="Top" Width="122"/>
-                    <Label Content="Filter" HorizontalAlignment="Left" Height="29" Margin="94,2,0,0" VerticalAlignment="Top" Width="123" Grid.Column="1"/>
-                    <CheckBox x:Name="checkBoxADRegEx" Content="RegEx" Height="29" Width="93" Grid.Column="1" Margin="304,41,-255,272" IsChecked="True"/>
-                    <TextBox x:Name="textBoxADFilter" TextWrapping="Wrap" Grid.Column="1" Margin="94,39,-143,275" />
-                    <Button x:Name="buttonADApplyFilter" Content="Apply _Filter" Height="31" Width="117" Grid.Column="1" Margin="94,86,-69,225"/>
-                    <Label Content="vCenter" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="100,226,0,0" />
-                    <TextBox x:Name="textBoxADRDPPort" TextWrapping="Wrap" Height="28" Width="189" Grid.Column="1" Margin="102,156,-136,158" />
-                    <Button x:Name="buttonADConnect" Content="_Connect" Height="31" Width="117" Grid.Column="1" Margin="102,301,-64,10"/>
-                    <RadioButton x:Name="radioButtonADConnectByIP" Content="Connect by _IP" Margin="97,202,-127,121" Grid.Column="1" GroupName="GroupBy"/>
-                    <RadioButton x:Name="radioButtonADConnectByName"   Content="Connect by _Name" Margin="216,202,-202,121" Grid.Column="1" GroupName="GroupBy" IsChecked="True"/>
-                    <Label Content="RDP Port" HorizontalAlignment="Left" Height="29" VerticalAlignment="Top" Width="124" Grid.Column="1" Margin="97,122,0,0" />
-                    <TextBox x:Name="textBoxADvCenter" TextWrapping="Wrap" Height="28" Grid.Column="1" Margin="100,255,-202,59" />
-                    <Button x:Name="buttonADDisconnect" Content="_Disconnect" Height="31" Width="117" Grid.Column="1" Margin="240,301,-202,10"/>
+                    
+                    <!-- put first so gets input cursor by default -->
+                    <TextBox x:Name="textBoxADFilter"  Grid.Row="1" Grid.Column="1" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top"  Width="Auto" HorizontalAlignment="Stretch"/>
+                    <TextBox x:Name="textBoxDomainController" Grid.Row="1" Grid.Column="0" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+                    <Label x:Name="labelADComputers" Content="0 Machines" Grid.Row="2" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5"/>
+                    <Label Content="Filter" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5"/>
+                    <!-- <CheckBox x:Name="checkBoxADRegEx" Content="RegE_x" Grid.Row="1" Grid.Column="1" Margin="5,40,0,0" VerticalAlignment="Top"/> -->
+                    <CheckBox x:Name="checkBoxADRecurse" Content="_Recurse" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0" VerticalAlignment="Top"/>
+                    <Label Content="Domain Controller" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+
+                    <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Stretch" >
+                        <RadioButton x:Name="radioButtonADTypeGroup"    Content="_Group"     Margin="5,0" GroupName="SearchBy"/>
+                        <RadioButton x:Name="radioButtonADTypeOU"       Content="_OU"        Margin="5,0" GroupName="SearchBy"/>
+                        <RadioButton x:Name="radioButtonADTypeComputer" Content="_Computer"  Margin="5,0" GroupName="SearchBy" IsChecked="True"/>
+                    </StackPanel>
+
+                    <Label Content="RDP Port" Grid.Row="0" Grid.Column="3" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxADRDPPort" Grid.Row="1" Grid.Column="3" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top"  />
+
+                    <StackPanel Grid.Row="5" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="5">
+                        <Button x:Name="buttonADSearch" Content="_Search" Width="100" Margin="5" />
+                        <Button x:Name="btnLaunchADOptions" Content="_Launch" Width="100" Margin="5" />
+                    </StackPanel>
                 </Grid>
             </TabItem>
         </TabControl>
@@ -484,6 +469,10 @@ drivestoredirect:s:$drivesToRedirect
         <Button x:Name="btnDeleteSnapShotTree" Content="Delete _Tree" HorizontalAlignment="Left" Margin="593,300,0,0" VerticalAlignment="Top" Width="92"/>
     </Grid>
 </Window>
+'@
+
+[string]$buyMeACoffee = @'
+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
 '@
 
 #endregion data
@@ -565,7 +554,24 @@ drivestoredirect:s:$drivesToRedirect
     'HSD' = 'Hannspree'
     'BOE' = 'BOE Technology'
  }
- 
+
+ Function Convert-Base64ToImageSource {
+    Param
+    (
+        [string]$base64
+    )
+
+    $bytes = [Convert]::FromBase64String($base64)
+    $stream = New-Object System.IO.MemoryStream( , $bytes)
+    $image = New-Object System.Windows.Media.Imaging.BitmapImage
+    $image.BeginInit()
+    $image.StreamSource = $stream
+    $image.CacheOption = 'OnLoad'
+    $image.EndInit()
+    $image.Freeze()
+    return $image
+}
+
  Function Get-Msrdc
  {
     [string]$msrdc = $null
@@ -651,7 +657,7 @@ Function Set-WindowToFront
     )
     
     ## first restore window
-    if( [bool]$setForegroundWindow = [user32]::ShowWindowAsync( $windowHandle , 9 ) ) ## 9 = SW_RESTORE
+    if( [bool]$setForegroundWindow = [user32]::ShowWindowAsync( $windowHandle , 9 )) ## 9 = SW_RESTORE
     {
         ## https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos
         ## now set window top most to bring it to front
@@ -1333,7 +1339,15 @@ Function New-RemoteSession
             Write-Verbose -Message "Already have window `"$windowTitle`" in process $($existingWindows.PID)"
             
             $otherprocess = Get-Process -Id $existingWindows.PID
-            $answer = [Windows.MessageBox]::Show(  "Activate Existing Window ?`nLaunched $($otherprocess.StartTime.ToString('G'))" , "Already Connected to $address" , 'YesNoCancel' ,'Question' )
+            try
+            {
+                $answer = [Windows.MessageBox]::Show(  "Activate Existing Window ?`nLaunched $($otherprocess.StartTime.ToString('G'))" , "Already Connected to $address" , 'YesNoCancel' ,'Question' )
+            }
+            catch
+            {
+                Write-Warning "Exception for existing process $($otherprocess.Name) (PID $($otherprocess.Id)) for $address : $_"
+                $answer = 'no'
+            }
             if( $answer -ieq 'yes' )
             {
                 if( $otherprocess )
@@ -1824,7 +1838,16 @@ Function Get-DisplayInfo
     Write-Verbose -Message "Got $($Screens.Count) screens"
 
     ## https://rakhesh.com/powershell/powershell-snippet-to-get-the-name-of-each-attached-monitor/
-    [array]$monitors = @( Get-CimInstance -ClassName WmiMonitorID -Namespace root\wmi )
+    [array]$monitors = @()
+
+    try
+    {
+        $monitors = @( Get-CimInstance -ClassName WmiMonitorID -Namespace root\wmi )
+    }
+    catch
+    {
+        Write-Warning -Message "Exception getting WmiMonitorID : $_"
+    }
 
     $chosenDisplay = $null
 
@@ -2100,7 +2123,7 @@ Function Add-VMwareVMsToListView
         [bool]$regex
     )
     $vmwareError = $null
-    $script:vms = @( Get-VM -ErrorVariable vmwareError -norecursion | Where-Object { $_.PowerState -ieq 'PoweredOn' -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and $_.Name -like $filter )) } | Sort-Object -Property Name | Select-Object -ExpandProperty Guest )
+    $script:vms = @( Get-VM -ErrorVariable vmwareError -norecursion | Where-Object { $_.PowerState -ieq 'PoweredOn' -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and ( [string]::IsNullOrEmpty( $filter ) -or $_.Name -like $filter ))) } | Sort-Object -Property Name | Select-Object -ExpandProperty Guest )
     if( $vmwareError )
     {
         [void][Windows.MessageBox]::Show( $vmwareError , 'VMware Error' , 'Ok' ,'Error' )
@@ -2132,7 +2155,7 @@ Function Add-HyperVVMsToListView
         $powerState = 'Running'
     }
     ## module qualifying in case clash with VMware PowerCLI. Deal with multiple hosts
-    $script:vms = @( Hyper-V\Get-VM -ErrorVariable hyperVError -ComputerName ($hyperVhost -split ',') | Where-Object { $_.State -match $powerState -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and $_.Name -like $filter )) } | Sort-Object -Property Name )
+    $script:vms = @( Hyper-V\Get-VM -ErrorVariable hyperVError -ComputerName ($hyperVhost -split ',') | Where-Object { $_.State -match $powerState -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and ( [string]::IsNullOrEmpty( $filter ) -or $_.Name -like $filter ))) } | Sort-Object -Property Name )
     if( $hyperVError )
     {
         [void][Windows.MessageBox]::Show( $hyperVError , "Hyper-V Error from $hyperVhost" , 'Ok' ,'Error' )
@@ -2153,7 +2176,7 @@ Function Start-RemoteSessionFromHypervisor
     Param
     (
         [Parameter(Mandatory=$true)]
-        [ValidateSet('VMware','Hyper-V')]
+        [ValidateSet('VMware','Hyper-V','AD')]
         [string]$hypervisorType ,
         [switch]$console
     )
@@ -2168,11 +2191,17 @@ Function Start-RemoteSessionFromHypervisor
         $radioButton = $WPFradioButtonHyperVConnectByIP
         $rdpportTextbox = $WPFtextBoxHyperVRDPPort
     }
+    elseif( $hypervisorType -ieq 'AD' )
+    {
+        $listView = $WPFlistViewAD
+        $radioButton = $null
+        $rdpportTextbox = $WPFtextBoxADRDPPort
+    }
     if( $listview.SelectedIndex -ge 0 )
     {
-        if( $null -eq $script:vms -or $listView.SelectedIndex -gt $script:vms.Count )
+        if( $hypervisorType -ine 'AD' -and ( $null -eq $script:vms -or $listView.SelectedIndex -gt $script:vms.Count ) )
         {
-            Write-Error -Message "Internal error : selected grid view index $($listView.SelectedIndex) greater than $(($script:vms|Measure-Object).Count)"]
+            Write-Error -Message "Internal error : selected grid view index $($listView.SelectedIndex) greater than $(($script:vms|Measure-Object).Count)"
             return
         }
         ForEach( $selection in $listView.selectedItems )
@@ -2181,6 +2210,10 @@ Function Start-RemoteSessionFromHypervisor
             if( $hypervisorType -ieq 'Hyper-V' )
             {
                 $vm = $script:vms | Where-Object Name -eq $selection.Name
+            }
+            elseif( $hypervisorType -ieq 'AD' )
+            {
+                $vm = $selection.Name ## not a VM but this was hacked in later :-)
             }
             else
             {
@@ -2227,7 +2260,7 @@ Function Start-RemoteSessionFromHypervisor
                     ## TODO launch VMware console - web or local app?
                 }
             }
-            elseif( $radioButton.IsChecked )
+            elseif( $radioButton -and $radioButton.IsChecked )
             {
                 ## TODO do we allow IPv6 ?
                 if( $hypervisorType -ieq 'vmware' )
@@ -2253,7 +2286,11 @@ Function Start-RemoteSessionFromHypervisor
             {
                 $address = $vm.Name
             }
-            else
+            elseif( $hypervisorType -ieq 'AD' )
+            {
+                $address = $vm
+            }
+            else ## VMware
             {
                 $address = $vm.Hostname
             }
@@ -2347,19 +2384,6 @@ Function Process-Action
         {
             $loopIterations++
             
-            if( $operation -match 'Hyper' )
-            {
-                $vm = $script:vms | Where-Object Name -eq $selection.Name
-            }
-            else
-            {
-                $vm = $script:vms | Where-Object VMName -eq $selection.Name
-            }
-            if( $null -eq $vm )
-            {
-                Write-Warning "Could not find VM for selected item $($selection.Name) out of $($script:vms.Count)"
-                ## might not be fatal as some operations don't use vm
-            }
             if( $operation -ieq 'DeleteComputer' ) ## not Hyper-V context
             {
                 Write-Verbose -Message "Deleting computer $selection"
@@ -2682,7 +2706,47 @@ Function Process-Action
                     Write-Warning "VM $($selecion.Name) has $($switches.Count) NICs which isn't yet implemented sorry"
                 }
                 Hyper-V\Connect-VMNetworkAdapter -VMName $selection.Name -SwitchName $switches[ 0 ].Name @hypervParameters
-            }      
+            }
+            elseif( $operation -ieq 'HyperV_RunOn' )
+            {
+                ## TODO bring output processing code for this from VMware GUI
+                if( -Not [string]::IsNullOrEmpty( $WPFtextBoxHyperVHost.Text ) -and $WPFtextBoxHyperVHost -ine 'localhost' )
+                {
+                    if( $null -eq $script:remoteSession )
+                    {
+                        $remoteError = $null
+                        $script:remoteSession = New-PSSession -ComputerName $WPFtextBoxHyperVHost.Text -ErrorVariable remoteError
+                        if( $null -eq $script:remoteSession )
+                        {
+                            $null = [Windows.MessageBox]::Show( $mainWindow , "Failed to remote to $($WPFtextBoxHyperVHost.Text)`n$remoteError" , 'Ok' ,'Error' )
+                            return
+                        }
+                    }
+                }
+                if( $null -eq $script:credentials )
+                {
+                    $script:credentials = Get-Credential -Message "Credentials for running in VM"
+                    if( $null -eq $script:credentials )
+                    {
+                        return
+                    }
+                }
+                ##TODO  get command and parameters
+                $commandError = $null
+                [string]$vmName = $selection.Name
+                [scriptblock]$commandToRun = { Invoke-Command -VMName $using:vmname -Credential $using:credentials -ScriptBlock { hostname.exe }}
+                [hashtable]$remoteParameters = @{}
+                if( $null -ne $script:remoteSession )
+                {
+                    $remoteParameters.Add( 'Session' , $script:remoteSession )
+                }
+                $job = Invoke-Command @remoteParameters -ScriptBlock $commandToRun -ErrorVariable commandError ## -AsJob
+                $status = $?
+                
+                ## TODO spawn commands async and then gather results later
+
+                ## need to figure how we detect credentials didn't work so we clear them so get prompted again
+            }
             else
             {
                 Write-Warning -Message "Unimplemented operation $Operation"
@@ -2694,6 +2758,129 @@ Function Process-Action
             $jobs | Write-Verbose
         }
     }
+    else
+    {
+        Write-Warning "No GUI object passed to Process-Action for action $operation"
+    }
+}
+
+Function Search-AD
+{
+    Param
+    (
+        [string]$domainController ,
+        [string]$searchFor ,
+        [string]$searchType
+    )
+
+    if( $searchType -ieq 'OU' )
+    {
+        $searchTerm = "(&(objectClass=organizationalUnit)(ou=$searchFor))"
+    }
+    elseif( $searchType -ieq 'group' )
+    {
+        $searchTerm = "(&(objectClass=group)(name=$searchFor))"
+    }
+    elseif( $searchType -ieq 'computer' )
+    {
+        $searchTerm = "(&(objectClass=computer)(name=$searchFor))"
+    }
+    else
+    {
+        Write-Error "Unexpected search type $searchType"
+        return
+    }
+
+    Write-Verbose -Message "Search term $searchTerm"
+
+    $objects = $null
+    $objects = (New-Object System.DirectoryServices.DirectorySearcher $searchTerm).FindAll()
+    if( $null -eq $objects -or $objects.Count -eq 0 )
+    {
+        [void][Windows.MessageBox]::Show( "Found no AD $searchType for `"$searchFor`"" , 'AD Searcher' , 'Ok' ,'Information' )
+        return
+    }
+    Write-Verbose "Got $($objects.Count) $searchType for $searchFor"
+
+    [System.Collections.Generic.List[object]]$items = @() 
+
+    ## if OU, get computers in the matched OU(s)
+    ## if group, get computers in the matched group(s)
+    if( $searchType -ieq 'group' )
+    {
+        ## TODO but these into a chooser rather than include all
+        ForEach( $group in $objects )
+        {
+            $groupEntry = New-Object -TypeName System.DirectoryServices.DirectoryEntry -ArgumentList $group.Path ## don't cache as could change
+            $members = $groupEntry.Properties["member"]
+            ForEach( $member in $members )
+            {
+                $entry = New-Object -TypeName System.DirectoryServices.DirectoryEntry -argumentList "LDAP://$member" ## TODO could cache this
+    
+                if ( $entry -and $entry.SchemaClassName -eq 'computer')
+                {
+                    $object = [pscustomobject]@{ Name = $entry.Properties['name'][0] ; Container = $group.Properties['name'][0] }
+                    if( $items -notcontains $object )
+                    {
+                        $items.Add( $object )
+                    }
+                }
+                elseif( $entry -and $entry.SchemaClassName -eq 'group' -and $WPFcheckBoxADRecurse.IsChecked )
+                {
+                    ## TODO recurse this group - have a mechanism to prevent infinite recursion
+                }
+            }
+        }
+    }
+    elseif( $searchType -ieq 'OU' )
+    {
+        ## TODO but these into a chooser rather than include all
+        ForEach( $OU in $objects )
+        {
+            $searcher = New-Object -TypeName System.DirectoryServices.DirectorySearcher
+            $searcher.SearchRoot = $OU.Path
+            if( $WPFcheckBoxADRecurse.IsChecked )
+            {
+                $searcher.SearchScope = [System.DirectoryServices.SearchScope]::Subtree
+            }
+            else
+            {
+                $searcher.SearchScope = [System.DirectoryServices.SearchScope]::OneLevel
+            }
+            $searcher.Filter = "(objectCategory=computer)"
+            [void]$searcher.PropertiesToLoad.AddRange( @("name","distinguishedName","operatingSystem"))
+            ForEach( $entry in $searcher.FindAll() )
+            {
+                $object = [pscustomobject]@{ Name = $entry.Properties['name'][0] ; Container = $OU.Properties['distinguishedname'][0] }
+                if( $items -notcontains $object )
+                {
+                    $items.Add( $object )
+                }
+            }
+        }
+    }
+    else ## computers
+    {
+        ForEach( $computer in $objects )
+        {
+            $items.Add( [pscustomobject]@{ Name = $computer.Properties['name'][0] ; Container = $computer.Properties['distinguishedname'][0] -replace '^CN=[^,]+,' } )
+        }
+    }
+
+    Write-Verbose -Message "Got $($items.Count) items"
+
+    $WPFlistViewAD.Items.Clear()
+    if( $items.Count -gt 0 )
+    {
+        ForEach( $item in $items )
+        {
+            $WPFlistViewAD.Items.Add( $item ) ## value comes from what is in Binding property for the grid view column
+        }
+    }
+    $WPFlabelADComputers.Content = "$($WPFlistViewAD.Items.Count) computers"
+ 
+
+    $null = 42
 }
 
 #endregion pre-main
@@ -2995,12 +3182,24 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V
         })
         
+        $WPFbtnLaunchADOptions.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Launch on AD clicked"
+            Start-RemoteSessionFromHypervisor -hypervisorType AD
+        })
+        
         $WPFbtnLaunchHyperVConsole.Add_Click({
             $_.Handled = $true
             Write-Verbose "Launch Console on Hyper-V clicked"
             Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V -console
         })
-
+        <#
+        $WPFbtnConnectHyperV.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Connect on Hyper-V clicked"
+            Add-HyperVVMsToListView -filter $WPFtextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -hyperVhost $WPFtextBoxHyperVHost.Text -all $WPFcheckBoxHyperVAllVMs.IsChecked
+        })
+        #>
         $WPFlistViewVMwareVMs.add_MouseDoubleClick({
             $_.Handled = $true
             Write-Verbose "Launch on VMware list item double clicked"
@@ -3028,7 +3227,23 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Add-VMwareVMsToListView -filter $wpfTextBoxVMwareFilter.Text -regex $WPFcheckBoxVMwareRegEx.IsChecked
         })
         
-        $WPFbuttonHyperVConnect.Add_Click({
+        $WPFbuttonADSearch.Add_Click({
+            [string]$searchType = 'OU'
+            if( $wpfradioButtonADTypeGroup.IsChecked )
+            {
+                $searchType = 'group'
+            }
+            elseif( $WPFradioButtonADTypeComputer.IsChecked )
+            {
+                $searchType = 'computer'
+            }
+            $_.Handled = $true
+            Write-Verbose "AD Search clicked - search type $searchType"
+            Search-AD -domainController $WPFtextBoxDomainController -searchFor $WPFtextBoxADFilter.Text -searchType $searchType
+        })
+        
+        <#
+        $WPFbtnConnectHyperV.Add_Click({
             $_.Handled = $true
             Write-Verbose "Hyper-V Connect clicked"
             $hyperVhost = $WPFtextBoxHyperVHost.Text.Trim() -replace '"'
@@ -3040,7 +3255,8 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             
             Add-HyperVVMsToListView -hyperVhost $hyperVhost -filter $wpfTextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -all $WPFcheckBoxHyperVAllVMs.IsChecked
         })
-        
+        #>
+
         if( -Not [string]::IsNullOrEmpty( $hypervHost ) )
         {
             $WPFtextBoxHyperVHost.Text = $hypervHost
@@ -3072,7 +3288,7 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Write-Verbose "Hyper-V Apply Filter clicked"
             Add-HyperVVMsToListView -filter $WPFtextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -hyperVhost $WPFtextBoxHyperVHost.Text -all $WPFcheckBoxHyperVAllVMs.IsChecked
         })
-        
+
         $WPFbuttonHyperVClearFilter.Add_Click({
             $_.Handled = $true
             Write-Verbose "Hyper-V Clear Filter clicked"
@@ -3086,7 +3302,14 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             $script:activeDisplaysWithMonitors = @( Get-DisplayInfo )
             Set-RemoteSessionProperties
         })
-        
+
+        $WPFbuttonHyperBuyMeACoffee.Add_Click({
+            $_.Handled = $true
+            [string]$beggingURL = 'https://www.buymeacoffee.com/guyrleech'
+            Write-Verbose "Buy Me A Coffee clicked - opening $beggingURL"
+            Start-Process -FilePath $beggingURL -Verb Open
+        })
+
         ## so enter key can launch rather than move to next grid line
         $WPFdatagridDisplays.add_PreviewKeyDown({
             Param
@@ -3141,10 +3364,40 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             }
         })
         
+        <# neither of these actually worked so changed hyperv host textbox to be first in tab
+
+        ## make Hyper-V host text box the item with the insert cursor
+        $wpftextBoxHyperVHost.Add_IsVisibleChanged({
+            Param( $sender , $args )
+
+            Write-Verbose -Message "Add_IsVisibleChanged: visible $($wpftextBoxHyperVHost.IsVisible)"
+            if( $wpftextBoxHyperVHost.IsVisible )
+            {
+                $wpftextBoxHyperVHost.Focus()
+                [System.Windows.Input.Keyboard]::Focus( $wpftextBoxHyperVHost )
+            }
+        })
+
+        $wpftabControl.Add_SelectionChanged({
+            Param( $sender , $args )
+
+            Write-Verbose -Message "Add_SelectionChanged: to $($WPFtabControl.SelectedItem.Header)"
+            if( $WPFtabControl.SelectedItem.Header -ieq 'Hyper-V' )
+            {
+                $wpftextBoxHyperVHost.Focus()
+                [System.Windows.Input.Keyboard]::Focus( $wpftextBoxHyperVHost )
+            }
+        })
+        #>
+
+        $WPFCoffeeImage.Source = Convert-Base64ToImageSource -base64 $buyMeACoffee
+
         $WPFHyperVPowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOn' })
         $WPFHyperVPowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOff' })
         $WPFHyperVShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ShutDown' })
         $WPFHyperVRestartContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Restart' })
+        
+        $WPFHyperVRunContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_RunOn' })
         $WPFHyperVDetailContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Detail' })
         $WPFHyperVDeleteContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_Delete' })
         $WPFHyperVDeleteAllContextMenu.Add_Click(   { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_DeleteIncludingDisks' })
