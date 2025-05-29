@@ -48,6 +48,7 @@
     2025/03/27 @guyrleech  Added message box for error if msrdc copy errors
     2025/04/09 @guyrleech  Added Buy Me A Coffee button
     2025/09/23 @guyrleech  Removed Hyper-V Connect button as Apply Filter does the same
+    2025/05/29 @guyrleech  Added Window Title text box
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -148,6 +149,11 @@ drivestoredirect:s:$drivesToRedirect
         
             <TabItem Header="Main">
                 <Grid  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>   <!-- Displays/DataGrid -->
+                    <RowDefinition Height="*"/>      <!-- Main controls -->
+                    <RowDefinition Height="Auto"/>   <!-- Buttons -->
+                </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="23*"/>
                         <ColumnDefinition Width="50*"/>
@@ -155,7 +161,7 @@ drivestoredirect:s:$drivesToRedirect
                         <ColumnDefinition Width="68*"/>
                         <ColumnDefinition Width="518*"/>
                     </Grid.ColumnDefinitions>
-                    <StackPanel Grid.ColumnSpan="5" Height="110" Margin="15,10,-160,0" VerticalAlignment="Top" Width="907">
+                    <StackPanel Grid.Row="0" Grid.ColumnSpan="5" Height="110" Margin="15,10,-160,0" VerticalAlignment="Top" Width="907">
                         <DataGrid x:Name="datagridDisplays" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" SelectionMode="Single" />
                     </StackPanel>
                     <Label Content="Computer" HorizontalAlignment="Left" Height="38" Margin="14,132,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
@@ -167,6 +173,8 @@ drivestoredirect:s:$drivesToRedirect
                             </ContextMenu>
                         </ComboBox.ContextMenu>
                     </ComboBox>
+                    <Label Content="Window&#xA;Title" HorizontalAlignment="Left" Height="46" Margin="14,320,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
+                    <TextBox x:Name="txtboxWindowTitle" Grid.Column="2" HorizontalAlignment="Left" Height="26" Margin="14,330,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="254" Text="" Grid.ColumnSpan="3"/>
                     <CheckBox x:Name="chkboxPrimary" Grid.Column="4" Content="Use primary monitor" HorizontalAlignment="Left" Height="21" Margin="145,215,0,0" VerticalAlignment="Top" Width="292"/>
                     <TextBox x:Name="txtboxDrivesToRedirect" Grid.Column="2" HorizontalAlignment="Left" Height="26" Margin="14,230,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="254" Text="*" Grid.ColumnSpan="3"/>
                     <Label Content="Drive&#xA;Redirection" HorizontalAlignment="Left" Height="46" Margin="14,220,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
@@ -183,9 +191,23 @@ drivestoredirect:s:$drivesToRedirect
                         </TextBox.InputBindings>
                     </TextBox>
                     <RadioButton x:Name="radioFillScreen" Grid.Column="4" Content="Fill Screen" HorizontalAlignment="Left" Height="24" Margin="145,348,0,0" VerticalAlignment="Top" Width="206" GroupName="WindowSize"/>
-                    <Button x:Name="btnLaunch" Content="_Launch" Grid.ColumnSpan="2" HorizontalAlignment="Left" Height="25" Margin="2,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="1"/>
-                    <Button x:Name="btnRefresh" Content="_Refresh" HorizontalAlignment="Left" Height="25" Margin="71,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="2" Grid.ColumnSpan="2"/>
-                    <Button x:Name="btnCreateShortcut" Content="_Create Shortcut" HorizontalAlignment="Left" Height="25" Margin="14,0,0,10" VerticalAlignment="Bottom" Width="96" Grid.Column="4"/>
+                 
+                     <Grid Grid.Row="2" Grid.ColumnSpan="5" VerticalAlignment="Bottom" Margin="5">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="btnLaunch" Content="_Launch" Grid.Column="0" Margin="5" Height="32" VerticalAlignment="Center"/>
+                        <Button x:Name="btnRefresh" Content="_Refresh" Grid.Column="1" Margin="5" Height="32" VerticalAlignment="Center"/>
+                        <Button x:Name="btnCreateShortcut" Content="_Create Shortcut" Grid.Column="2" Height="32"  Margin="5" VerticalAlignment="Center"/>
+                        <Button x:Name="buttonBuyMeACoffee" Cursor="Pen" ToolTip="Buy me a coffee!" Grid.Column="3" Height="32" Margin="5" VerticalAlignment="Center">
+                            <Viewbox Stretch="Uniform">
+                                <Image x:Name="CoffeeImage2" Stretch="Fill"/>
+                            </Viewbox>
+                        </Button>
+                    </Grid>
                     <Label Content="User" HorizontalAlignment="Left" Height="38" Margin="14,181,0,0" VerticalAlignment="Top" Width="71" Grid.ColumnSpan="3"/>
                     <TextBox x:Name="textboxUsername" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,186,0,0" VerticalAlignment="Top" Width="254" Grid.ColumnSpan="3"/>
                 </Grid>
@@ -1312,8 +1334,13 @@ Function New-RemoteSession
             }
             if( -Not $nofriendlyName )
             {
-                $commandLine = "$commandLine /friendlyname:`"$filename`""
-                $windowTitle = $filename
+                [string]$newName = $wpftxtboxWindowTitle.Text
+                if( [string]::IsNullOrEmpty( $newName ) )
+                {
+                    $newName = $filename
+                }
+                $commandLine = "$commandLine /friendlyname:`"$newName`""
+                $windowTitle = $newName
             }
         }
         else ## mstsc
@@ -3310,6 +3337,13 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Start-Process -FilePath $beggingURL -Verb Open
         })
 
+        $WPFbuttonBuyMeACoffee.Add_Click({
+            $_.Handled = $true
+            [string]$beggingURL = 'https://www.buymeacoffee.com/guyrleech'
+            Write-Verbose "Buy Me A Coffee clicked - opening $beggingURL"
+            Start-Process -FilePath $beggingURL -Verb Open
+        })
+
         ## so enter key can launch rather than move to next grid line
         $WPFdatagridDisplays.add_PreviewKeyDown({
             Param
@@ -3391,7 +3425,7 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         #>
 
         $WPFCoffeeImage.Source = Convert-Base64ToImageSource -base64 $buyMeACoffee
-
+        $WPFCoffeeImage2.Source = Convert-Base64ToImageSource -base64 $buyMeACoffee
         $WPFHyperVPowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOn' })
         $WPFHyperVPowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOff' })
         $WPFHyperVShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ShutDown' })
