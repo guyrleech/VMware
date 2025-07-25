@@ -49,6 +49,8 @@
     2025/04/09 @guyrleech  Added Buy Me A Coffee button
     2025/09/23 @guyrleech  Removed Hyper-V Connect button as Apply Filter does the same
     2025/05/29 @guyrleech  Added Window Title text box
+    2025/06/19 @guyrleech  Added Azure tab
+    2025/07/25 @guyrleech  Added long press functionality in Hyper-V VM list to clear selections and launch remote session if ctrl or alt pressed too
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -89,6 +91,7 @@ Param
     [switch]$noResize , ## use mstsc with no width/height parameters
     [string]$widthHeight , ## colon delimited
     [string]$xy , ## colon delimited
+    [decimal]$longPressSeconds = 1 ,
     [string]$drivesToRedirect = '*' ,
     [string]$extraMsrdcParameters = '/SkipAvdSignatureChecks' ,
     [string]$msrdcCopyPath ,
@@ -117,6 +120,8 @@ $script:vmwareConnection = $null
 [array]$script:theseSnapshots = @()
 $script:remoteSession = $null
 $script:credentials = $null
+$script:leftButtonClickedTime = $null
+$script:targetItemData = $null
 
 # keep user added comments so can set when displays change
 ##$script:itemscopy = New-Object -TypeName System.Collections.Generic.List[object]
@@ -386,6 +391,107 @@ drivestoredirect:s:$drivesToRedirect
                     </StackPanel>
                 </Grid>
             </TabItem>
+            
+            <TabItem Header="Azure" x:Name="tabAzure">
+                <Grid x:Name="AzureOptions" Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
+                        <ColumnDefinition Width="1*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Label Content="Host" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxAzureHost" Grid.Row="1" Grid.Column="0" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+
+                    <Label x:Name="labelAzureVMs" Content="0 VMs" Grid.Row="1" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <Label Content="Filter" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxAzureFilter" Grid.Row="1" Grid.Column="1" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+                    <CheckBox x:Name="checkBoxAzureRegEx" Content="RegE_x" Grid.Row="1" Grid.Column="1" Margin="5,40,0,0" VerticalAlignment="Top" />
+                    <CheckBox x:Name="checkBoxAzureAllVMs" Content="_All VMs" Grid.Row="1" Grid.Column="1" Margin="5,70,0,0" VerticalAlignment="Top" />
+
+                    <RadioButton x:Name="radioButtonAzureConnectByIP" Content="Connect by _IP" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0"  GroupName="GroupBy"/>
+                    <RadioButton x:Name="radioButtonAzureConnectByName"   Content="Connect by _Name" Grid.Row="1" Grid.Column="3" Margin="5,70,0,0"  GroupName="GroupBy" IsChecked="True"/>
+
+                    <Label Content="RDP Port" Grid.Row="0" Grid.Column="3" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxAzureRDPPort" Grid.Row="1" Grid.Column="3" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+
+                    <ListView x:Name="listViewAzureVMs" Grid.Row="2" Grid.ColumnSpan="4" Margin="5" VerticalAlignment="Stretch" SelectionMode="Multiple">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" />
+                                <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}" />
+                            </GridView>
+                        </ListView.View>
+                        <ListView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Power" x:Name="AzurePowerContextMenu">
+                                    <MenuItem Header="Power On" x:Name="AzurePowerOnContextMenu" />
+                                    <MenuItem Header="Power Off" x:Name="AzurePowerOffContextMenu" />
+                                    <MenuItem Header="Shutdown" x:Name="AzureShutdownContextMenu" />
+                                    <MenuItem Header="Restart" x:Name="AzureRestartContextMenu" />
+                                    <MenuItem Header="Resume" x:Name="AzureResumeContextMenu" />
+                                    <MenuItem Header="Save" x:Name="AzureSaveContextMenu" />
+                                    <MenuItem Header="Suspend" x:Name="AzureSuspendContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Config" x:Name="AzureConfigContextMenu">
+                                    <MenuItem Header="Run" x:Name="AzureRunContextMenu" />
+                                    <MenuItem Header="Detail" x:Name="AzureDetailContextMenu" />
+                                    <MenuItem Header="Rename" x:Name="AzureRenameMenu" />
+                                    <MenuItem Header="Reconfigure" x:Name="AzureReconfigureMenu" />
+                                    <MenuItem Header="Enable Nested Virtualisation" x:Name="AzureEnableNestedVirtualisationContextMenu" />
+                                    <MenuItem Header="Enable Resource Metering" x:Name="AzureEnableResourceMeteringContextMenu" />
+                                    <MenuItem Header="Performance Data" x:Name="AzureMeasureContextMenu" />
+                                    <MenuItem Header="Disable Resource Metering" x:Name="AzureDisableResourceMeteringContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Delete" x:Name="AzureDeletionContextMenu">
+                                    <MenuItem Header="Delete VM" x:Name="AzureDeleteContextMenu" />
+                                    <MenuItem Header="Delete VM + Disks" x:Name="AzureDeleteAllContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Snapshots" x:Name="AzureSnapshotsContextMenu">
+                                    <MenuItem Header="Manage" x:Name="AzureManageSnapshotContextMenu" />
+                                    <MenuItem Header="Take Snapshot" x:Name="AzureTakeSnapshotContextMenu" />
+                                    <MenuItem Header="Revert to Latest Snapshot" x:Name="AzureRevertLatestSnapshotContextMenu" />
+                                    <MenuItem Header="Delete Latest Snapshot" x:Name="AzureDeleteLatestSnapshotContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="New" x:Name="AzureNewContextMenu">
+                                    <MenuItem Header="Brand New" x:Name="AzureNewVMContextMenu" />
+                                    <MenuItem Header="Templated" x:Name="AzureNewVMFromTemplateContextMenu" />
+                                </MenuItem>
+                                <MenuItem Header="Name to Clipboard" x:Name="AzureNameToClipboard" />
+                                <MenuItem Header="NICS" x:Name="AzureNICSContextMenu">
+                                    <MenuItem Header="Disconnect NIC" x:Name="AzureDisconnectNICContextMenu" />
+                                    <MenuItem Header="Connect To" x:Name="AzureConnectNICContextMenu">
+                                        <MenuItem Header="Internal" x:Name="AzureConnectNICInternalContextMenu" />
+                                        <MenuItem Header="External" x:Name="AzureConnectNICExternalContextMenu" />
+                                        <MenuItem Header="Private" x:Name="AzureConnectNICPrivateContextMenu" />
+                                    </MenuItem>
+                                </MenuItem>
+                            </ContextMenu>
+                        </ListView.ContextMenu>
+                    </ListView>
+
+                    <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="5">
+                        <Button x:Name="btnLaunchAzureOptions" Content="_Launch" Width="100" Margin="5" />
+                        <Button x:Name="btnLaunchAzureConsole" Content="C_onsole" Width="100" Margin="5" />
+                      <!-- Apply Filter does the same  <Button x:Name="btnConnectAzure" Content="_Connect" Width="100" Margin="5" />   -->
+                        <Button x:Name="buttonAzureApplyFilter" Content="Apply _Filter" Width="100" Margin="5" />
+                        <Button x:Name="buttonAzureClearFilter" Content="Clea_r Filter" Width="100" Margin="5" />
+                        <Button x:Name="buttonAzureBuyMeACoffee" Cursor="Pen" ToolTip="Buy me a coffee!">
+                            <Viewbox Stretch="Uniform">
+                                <Image x:Name="CoffeeImageAzure" Stretch="Fill"/>
+                            </Viewbox>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="Active Directory" x:Name="tabActiveDirectory" IsEnabled="true">
             
                  <Grid x:Name="gridActiveDirectory" Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
@@ -3228,11 +3334,80 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         })
         #>
         $WPFlistViewVMwareVMs.add_MouseDoubleClick({
-            $_.Handled = $true
             Write-Verbose "Launch on VMware list item double clicked"
             Start-RemoteSessionFromHypervisor -hypervisorType VMware
+            $_.Handled = $true
         })
         
+        $WPFlistViewHyperVVMs.Add_PreviewMouseLeftButtonDown({
+            param($sender, $eventArguments)
+
+            $script:leftButtonClickedTime = [datetime]::Now
+             
+            $dataContext = $null
+            $element = $eventArguments.OriginalSource
+    
+            # Walk up the visual tree looking for an element with DataContext
+            while ($element -and $null -eq $dataContext)
+            {
+                if ($element.DataContext -and $element.DataContext -isnot [System.Windows.Data.CollectionView])
+                {
+                    $dataContext = $element.DataContext
+                    break
+                }
+                $element = $element.Parent
+            }
+    
+            $script:targetItemData = $dataContext
+        })
+        
+        $WPFlistViewHyperVVMs.Add_PreviewMouseLeftButtonUp({
+            param($sender, $eventArguments )
+
+            $now = [datetime]::Now
+            $leftButtonClickedDuration = New-TimeSpan
+            if( $null -ne $script:leftButtonClickedTime )
+            {
+                $leftButtonClickedDuration = $now - $script:leftButtonClickedTime
+                if( $leftButtonClickedDuration.TotalSeconds -gt $longPressSeconds )
+                {
+                    Write-Verbose "Long press, unselected $($WPFlistViewHyperVVMs.SelectedItems.Count) items"
+                    $WPFlistViewHyperVVMs.SelectedItems.Clear()
+                    $foundItem = $null
+                    if( $null -ne $script:targetItemData )
+                    {
+                         foreach ($item in $WPFlistViewHyperVVMs.Items)
+                         {
+                            if ($item -eq $script:targetItemData)
+                            {
+                                $WPFlistViewHyperVVMs.SelectedItems.Add( ( $foundItem = $item ))
+                                Write-Verbose "Long press, selecting $item"
+                                break
+                            }
+                        }
+                    }
+                    if( $null -ne $foundItem )
+                    {
+                        
+                        $modifiers = [System.Windows.Input.Keyboard]::Modifiers
+                        ## if ( ( $ctrlDown = [System.Windows.Input.Keyboard]::IsKeyDown([System.Windows.Input.Key]::LeftCtrl)) -or [System.Windows.Input.Keyboard]::IsKeyDown([System.Windows.Input.Key]::LeftAlt ) ) )
+                        if( ( $ctrlDown = ( $modifiers -band [System.Windows.Input.ModifierKeys]::Control ) -ne [System.Windows.Input.ModifierKeys]::None ) `
+                            -or ( $modifiers -band [System.Windows.Input.ModifierKeys]::Alt ) -ne [System.Windows.Input.ModifierKeys]::None )
+                        {
+                            Write-Verbose "Alt or control ($ctrlDown) down so launching"
+                        
+                            # Force immediate UI update otherwise previously selected items will show whilst session launching
+                            $WPFlistViewHyperVVMs.UpdateLayout()
+                            [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Render, [System.Action]{})
+           
+                            Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V -console:$ctrlDown
+                        }
+                    }
+                }
+            }
+            Write-Verbose -Message "$([datetime]::Now.ToString('G')) left mouse up, duration $($leftButtonClickedDuration.TotalMilliseconds)"
+        })
+
         $WPFlistViewHyperVVMs.add_MouseDoubleClick({
             $_.Handled = $true
             Write-Verbose "Launch on Hyper-V list item double clicked"
@@ -3426,6 +3601,7 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
 
         $WPFCoffeeImage.Source = Convert-Base64ToImageSource -base64 $buyMeACoffee
         $WPFCoffeeImage2.Source = Convert-Base64ToImageSource -base64 $buyMeACoffee
+        $WPFCoffeeImageAzure.Source = Convert-Base64ToImageSource -base64 $buyMeACoffee
         $WPFHyperVPowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOn' })
         $WPFHyperVPowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_PowerOff' })
         $WPFHyperVShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewHyperVVMs -Operation 'HyperV_ShutDown' })
@@ -3504,3 +3680,83 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
 }
 
 New-RemoteSession -rethrow
+
+# SIG # Begin signature block
+# MIIOVAYJKoZIhvcNAQcCoIIORTCCDkECAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDG0/i4LzWxgOd9
+# v5hv/Mrlo/GjQsV2+pVB1InSEeAqP6CCDCYwggV9MIIDZaADAgECAhAB1rN1Nl8g
+# zZEd1y/l+ZNkMA0GCSqGSIb3DQEBCwUAMFoxCzAJBgNVBAYTAkxWMRkwFwYDVQQK
+# ExBFblZlcnMgR3JvdXAgU0lBMTAwLgYDVQQDEydHb0dldFNTTCBHNCBDUyBSU0E0
+# MDk2IFNIQTI1NiAyMDIyIENBLTEwHhcNMjUwNzIxMDAwMDAwWhcNMjYwNzIwMjM1
+# OTU5WjBxMQswCQYDVQQGEwJHQjESMBAGA1UEBxMJV2FrZWZpZWxkMSYwJAYDVQQK
+# Ex1TZWN1cmUgUGxhdGZvcm0gU29sdXRpb25zIEx0ZDEmMCQGA1UEAxMdU2VjdXJl
+# IFBsYXRmb3JtIFNvbHV0aW9ucyBMdGQwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAARE
+# VushBxmaLDZJys/h4fGHMe+gEacCcTcalje+NTkKlUboku0+BdNDPxotbsh0aHHv
+# HhwndrrL7f/pD45f5VUVKK5F3rQY7bZjZ6gxwGa/BzuFZsRhO12MTMC7zawyaQCj
+# ggHUMIIB0DAfBgNVHSMEGDAWgBTJ/BDvUMjLa3+9CETvOmKT7VtemjAdBgNVHQ4E
+# FgQU+7W5w1B8mWyXaJebkcnMJkcSB+cwPgYDVR0gBDcwNTAzBgZngQwBBAEwKTAn
+# BggrBgEFBQcCARYbaHR0cDovL3d3dy5kaWdpY2VydC5jb20vQ1BTMA4GA1UdDwEB
+# /wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzCBlwYDVR0fBIGPMIGMMESgQqBA
+# hj5odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vR29HZXRTU0xHNENTUlNBNDA5NlNI
+# QTI1NjIwMjJDQS0xLmNybDBEoEKgQIY+aHR0cDovL2NybDQuZGlnaWNlcnQuY29t
+# L0dvR2V0U1NMRzRDU1JTQTQwOTZTSEEyNTYyMDIyQ0EtMS5jcmwwgYMGCCsGAQUF
+# BwEBBHcwdTAkBggrBgEFBQcwAYYYaHR0cDovL29jc3AuZGlnaWNlcnQuY29tME0G
+# CCsGAQUFBzAChkFodHRwOi8vY2FjZXJ0cy5kaWdpY2VydC5jb20vR29HZXRTU0xH
+# NENTUlNBNDA5NlNIQTI1NjIwMjJDQS0xLmNydDAJBgNVHRMEAjAAMA0GCSqGSIb3
+# DQEBCwUAA4ICAQALHZsdOuMeT/e1fsdQfhIz/2wS19UWlG1lxXieYOmPAju0DA5I
+# ZheTgMtWMkUm96gWNtixny+q5nX8ckzuuD47esI2bM4G9RcVVKN0vdLZHv6QXZE5
+# Ht2qTX8E1bqfejtDcGY0aqOjVYeOi/o98BsR98ItkjWNP3xE2oKEx6xYyZBL6d/z
+# HB2ySd7hdk4VfmH9rTRftAsAn5L9s6m2ILRK8QRrkUJY9RxXswvQy2gNzccg+eYw
+# y5gvLnzp4kdsTleV8SyZZQ2Tcp+HHPGxekB1NIM55vlCb9ocYw5j7noae3/PF+u/
+# Zt/E+copm1c+MDju2bz1EelqXxuVsICRV9ikpJ7QEU+LwUiT7Ne+mgBmQ3IIyb8d
+# QwR0xu1E/sKoWZjPRha6JLe65RaoBnXOX6fWQglPx467qjTUQpLxKGKMdQjS+LGJ
+# uI2/BMWBHJfdhz/3GR9XVaDOWLhk+ChkjoXBgF2uFEXSiv4LNgigQ1R9RiojukEz
+# mSRe5LK0UPdJch5I/HXg1lJFPORx05Ila0uSMusisgrPNvl5fEuf+DGYl2ywHsZQ
+# pkeKT5wHQ5QJEocTKwGPfiGe9drO5DoMos5AXL5xnrPh/aQB4XKrttZTFy0+YXrU
+# WSYa9v2rp7cAwuDsmd9gLoQzfW7jagbHfxvmLQ0CJTO9Y4BsJZML4bjimDCCBqEw
+# ggSJoAMCAQICEAeEPa0BwRXCdO5BpygiRnkwDQYJKoZIhvcNAQELBQAwYjELMAkG
+# A1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRp
+# Z2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290IEc0MB4X
+# DTIyMDYyMzAwMDAwMFoXDTMyMDYyMjIzNTk1OVowWjELMAkGA1UEBhMCTFYxGTAX
+# BgNVBAoTEEVuVmVycyBHcm91cCBTSUExMDAuBgNVBAMTJ0dvR2V0U1NMIEc0IENT
+# IFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0EtMTCCAiIwDQYJKoZIhvcNAQEBBQADggIP
+# ADCCAgoCggIBAK0e9AeyQ2aKomd3JZUKpfgW1inkV8ks71KHQG7Be68F41i3bXF/
+# yH+ksn/tjN4pw2r3PjMSF5yq0PTGFu9IHySwEB9YExk7Q0t85PSPtbI24Puu/5kX
+# Nr6bEhDv2zV0KLBQzAaidqgMruapl8OkoQTFHpTIoGHdpq1PvdTYibH/H59hOZAW
+# r43wWsuzoWHpgQZYlOCzHLDV8AKEJ+C0RxmR21yAruq6qyQe1bo8n2XlU0ntPdZe
+# nOew47GvPerHQLNaPArz7cq/ZfqmJa93xhF8A7JxKtPj88zRwcsVznGz/ib96TgU
+# KdhJ6bjd2gV+0HFkFCQcqg9bcG3pUiuFUjC87uGtSOFyEkllh1KV3dsA0O+Inn9O
+# g/sQ2/3tT0y0oW+YLl3N3WngfEVHSnnBaZhBtb7LdEWbSenof2bnsxQw2nTKyZ0m
+# NvR/v51Utfc4QFRvof6vUtEtlP/EQ5O7A7EaDZLjDbkoYv1IIFRbieQGWM8d4lOh
+# T5Me3Q/xlB/gH0gWUbG0srSDe44CfBIWAq2Y2OGROXxxosBDBuAQg0KquFzRvqTZ
+# nz5DCBUAvSci7Mz1yQo/zG0hxaDzkvf+XRxOQdB176MoYMbYJ3EEe1+UshS3CoPs
+# kDa4LFaUjNE2DBPSQfZ6fT5BXwrOJIZqo7avTqTBuirb/HLh73wIR9JjAgMBAAGj
+# ggFZMIIBVTASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBTJ/BDvUMjLa3+9
+# CETvOmKT7VtemjAfBgNVHSMEGDAWgBTs1+OC0nFdZEzfLmc/57qYrhwPTzAOBgNV
+# HQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwMwdwYIKwYBBQUHAQEEazBp
+# MCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQQYIKwYBBQUH
+# MAKGNWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRS
+# b290RzQuY3J0MEMGA1UdHwQ8MDowOKA2oDSGMmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0
+# LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3JsMBwGA1UdIAQVMBMwBwYFZ4EM
+# AQMwCAYGZ4EMAQQBMA0GCSqGSIb3DQEBCwUAA4ICAQAL2wrXsh2YpMJRq0Szv7J7
+# CEmcni3KsvA0Sd+Xoesbw+bsdnRv7klz4YaolPyRFzuaKG5Wt2xg0d2Jy54Mv2Ka
+# G0K6wj+tSaPCG1+Wn5eAuSaAsauawSGjVv6UaJGnssL/XR2LxIA6KUOQePlnHXjb
+# FG8GutaP1451IYfBi5sCwR3oIOiPBxpXP2l9czNg7eRzQ7o9eDVORyCRiUJQC4Me
+# 6T+xnHrxbQVWPU/aIyH5VSr2UvWm6ugDJ2h5ZVSH/5wxd6p+CkGqUBb6vyZrkXrI
+# ovSy1VAfy9hvURLSYlIg/Ih+QiMLVXSltlLenRBawppp8Sivx8t8s19LGe1Uj+6C
+# 63T7p6SW49ZGkRcf4kCI11GNsttlyEJER7f9eXRiXCQD55BUl8zQDteK4W1j+Y6k
+# rYA34Tbm3mZBgWGl3FlfktMMpaAOdv4DpCcS3iI3K6Rwtom5Lwg+A/PQTYAtku3d
+# Gqz6VeJ8r8bCc0hZA1t/sWYsMH2mHyLx2+xHWGyNzYo8RbhsCxu8tzPyE3XMTX9B
+# s5X3a8MagWPBk6LaShD5TISHR7yMMUcAol5Mj6nwQ8T+aq+iMsUCe3fXJcgDa2O3
+# QRG2yOSEE2ZljpIQ5+cig7C/Kpq8s/JrVS3f/Zw4Uu41DxCXodpmw1ASuefOf5kQ
+# BpROQ9lp5XKgciQ4MQIvOTGCAYQwggGAAgEBMG4wWjELMAkGA1UEBhMCTFYxGTAX
+# BgNVBAoTEEVuVmVycyBHcm91cCBTSUExMDAuBgNVBAMTJ0dvR2V0U1NMIEc0IENT
+# IFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0EtMQIQAdazdTZfIM2RHdcv5fmTZDANBglg
+# hkgBZQMEAgEFAKCBhDAYBgorBgEEAYI3AgEMMQowCKACgAChAoAAMBkGCSqGSIb3
+# DQEJAzEMBgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEV
+# MC8GCSqGSIb3DQEJBDEiBCAyj8zH2yOHHu5yZk70+fBdoO0J9Dffn9bwVH4znMNX
+# HTALBgcqhkjOPQIBBQAEaDBmAjEAzLUdo0HT8EHghSzlCFM69hDj34f7LkcN2otW
+# hkccb8/d59TjIaExP/FFVCPgI7+FAjEAr+QKxn3vkJzqs6eQkRgRUCYbVo9EX/kl
+# cPPzLhXM0dOsheUH7RLHaAdUc9Cp6Wje
+# SIG # End signature block
