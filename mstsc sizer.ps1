@@ -1,4 +1,4 @@
-﻿#requires -version 3
+#requires -version 3
 
 <#
 .SYNOPSIS
@@ -51,6 +51,13 @@
     2025/05/29 @guyrleech  Added Window Title text box
     2025/06/19 @guyrleech  Added Azure tab
     2025/07/25 @guyrleech  Added long press functionality in Hyper-V VM list to clear selections and launch remote session if ctrl or alt pressed too
+    2025/08/29 @guyrleech  Added DNS resolution to VM detail pane
+    2025/09/08 @guyrleech  Fixed bug in enabling nested virtualisation
+    2025/09/26 @guyrleech  Added keyboard handling radio buttons
+    2025/10/05 @guyrleech  Double click fixed
+    2026/05/14 @guyrleech  Added  -asyncActions
+    2026/06/09 @guyrleech  Added Azure VMs
+    2026/06/18 @guyrleech  Added AVD checkbox on Azure tab and AVD columns
 
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
@@ -85,12 +92,14 @@ Param
     [string]$remoteDesktopName ,
     [string]$hypervHost ,
     [switch]$primary ,
+    [switch]$asyncActions ,
     [string]$percentage ,
     [switch]$usemsrdc ,
     [switch]$noFriendlyName ,
     [switch]$noResize , ## use mstsc with no width/height parameters
     [string]$widthHeight , ## colon delimited
     [string]$xy , ## colon delimited
+    [switch]$avd ,
     [decimal]$longPressSeconds = 1 ,
     [string]$drivesToRedirect = '*' ,
     [string]$extraMsrdcParameters = '/SkipAvdSignatureChecks' ,
@@ -110,9 +119,15 @@ Param
     [int]$pollForWindowEveryMilliseconds = 333 ,
     [string]$tempFolder = $(Join-Path -Path $env:temp -ChildPath 'Guy Leech mstsc Sizer') ,
     [string]$exe = 'mstsc.exe' ,
+    [string]$AVDAPIversion = '2022-09-09' ,
     [string]$configKey = 'HKCU:\SOFTWARE\Guy Leech\mstsc wrapper'
 )
 
+Function StuffToDo()
+{
+    ## add signing option with auto generate certificate or existing
+    Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert|Where NotAfter -gt (Get-Date)
+}
 #region data
 
 [array]$script:vms = $null
@@ -122,6 +137,9 @@ $script:remoteSession = $null
 $script:credentials = $null
 $script:leftButtonClickedTime = $null
 $script:targetItemData = $null
+$script:azureColumnFilters = @{}
+$script:azureColumnHeaders = @{}
+$script:azureSelectedSubscription = $null
 
 # keep user added comments so can set when displays change
 ##$script:itemscopy = New-Object -TypeName System.Collections.Generic.List[object]
@@ -217,21 +235,49 @@ drivestoredirect:s:$drivesToRedirect
                     <TextBox x:Name="textboxUsername" Grid.Column="2" HorizontalAlignment="Left" Height="27" Margin="14,186,0,0" VerticalAlignment="Top" Width="254" Grid.ColumnSpan="3"/>
                 </Grid>
             </TabItem>
+
             <TabItem Header="Mstsc Options">
-                <Grid Margin="0,0,100,100   " Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                <Grid Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="214*"/>
-                        <ColumnDefinition Width="53*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <CheckBox x:Name="chkboxMultimon" Content="_Multi Monitor" HorizontalAlignment="Left" Height="28" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
-                    <CheckBox x:Name="chkboxSpan" Content="_Span" HorizontalAlignment="Left" Height="28" Margin="0,29,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
-                    <CheckBox x:Name="chkboxAdmin" Content="_Admin" HorizontalAlignment="Left" Height="28" Margin="0,57,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
-                    <CheckBox x:Name="chkboxPublic" Content="_Public" HorizontalAlignment="Left" Height="28" Margin="0,85,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
-                    <CheckBox x:Name="chkboxRemoteGuard" Content="Remote _Guard" HorizontalAlignment="Left" Height="28" Margin="0,113,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
-                    <CheckBox x:Name="chkboxRestrictedAdmin" Content="_Restricted Admin" HorizontalAlignment="Left" Height="28" Margin="0,141,0,0" VerticalAlignment="Top" Width="267" Grid.ColumnSpan="2"/>
-                    <Button x:Name="btnLaunchMstscOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-128" IsDefault="True"/>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    
+                    <!-- Checkboxes spanning both columns -->
+                    <CheckBox x:Name="chkboxMultimon" Content="_Multi Monitor" Grid.Row="0" Grid.ColumnSpan="2" Height="28" Margin="5"/>
+                    <CheckBox x:Name="chkboxSpan" Content="_Span" Grid.Row="1" Grid.ColumnSpan="2" Height="28" Margin="5"/>
+                    <CheckBox x:Name="chkboxAdmin" Content="_Admin" Grid.Row="2" Grid.ColumnSpan="2" Height="28" Margin="5"/>
+                    <CheckBox x:Name="chkboxPublic" Content="_Public" Grid.Row="3" Grid.ColumnSpan="2" Height="28" Margin="5"/>
+                    <CheckBox x:Name="chkboxRemoteGuard" Content="Remote _Guard" Grid.Row="4" Grid.ColumnSpan="2" Height="28" Margin="5"/>
+                    <CheckBox x:Name="chkboxRestrictedAdmin" Content="_Restricted Admin" Grid.Row="5" Grid.ColumnSpan="2" Height="28" Margin="5"/>
+                    
+                    <!-- Key Handling label in left column -->
+                    <Label Content="Key Handling:" Grid.Row="6" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" FontWeight="Bold" Margin="5"/>
+                    
+                    <!-- Radio buttons indented to the right in left column -->
+                    <RadioButton x:Name="radioKeysLocal" Content="Keys _Local" Grid.Row="7" Grid.Column="0" Height="24" Margin="25,5,5,5" GroupName="KeyHandling"/>
+                    <RadioButton x:Name="radioKeysRemote" Content="Keys _Remote" Grid.Row="8" Grid.Column="0" Height="24" Margin="25,5,5,5" GroupName="KeyHandling" IsChecked="True"/>
+                    <RadioButton x:Name="radioKeysFullScreen" Content="Keys Remote in _Fullscreen" Grid.Row="9" Grid.Column="0" Height="24" Margin="25,5,5,5" GroupName="KeyHandling"/>
+
+                    <!-- Launch button -->
+                    <Button x:Name="btnLaunchMstscOptions" Content="_Launch" Grid.Row="12" Grid.ColumnSpan="2" Height="32" Width="100" HorizontalAlignment="Center" Margin="10" IsDefault="True"/>
                 </Grid>
             </TabItem>
+
             <TabItem Header="Other Options">
                 <Grid x:Name="OtherRDPOptions" Margin="55,0,528,0"  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.ColumnDefinitions>
@@ -245,6 +291,7 @@ drivestoredirect:s:$drivesToRedirect
                     <Button x:Name="btnLaunchOtherOptions" Content="_Launch" HorizontalAlignment="Left" Height="25" VerticalAlignment="Bottom" Width="96" Margin="10,0,0,-19" IsDefault="True"/>
                 </Grid>
             </TabItem>
+
             <TabItem Header="VMware" x:Name="tabVMware">
                  <Grid x:Name="gridVMware" Margin="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                     <Grid.RowDefinitions>
@@ -401,20 +448,21 @@ drivestoredirect:s:$drivesToRedirect
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1*" />
                         <ColumnDefinition Width="1*" />
                         <ColumnDefinition Width="1*" />
                         <ColumnDefinition Width="1*" />
                     </Grid.ColumnDefinitions>
 
-                    <Label Content="Host" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
-                    <TextBox x:Name="textBoxAzureHost" Grid.Row="1" Grid.Column="0" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
-
                     <Label x:Name="labelAzureVMs" Content="0 VMs" Grid.Row="1" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+
+                    <Label Content="Tenant" Grid.Row="0" Grid.Column="2" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <TextBox x:Name="textBoxAzureTenant" Grid.Row="1" Grid.Column="2" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" IsReadOnly="True" Background="#F0F0F0" />
                     <Label Content="Filter" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
                     <TextBox x:Name="textBoxAzureFilter" Grid.Row="1" Grid.Column="1" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
                     <CheckBox x:Name="checkBoxAzureRegEx" Content="RegE_x" Grid.Row="1" Grid.Column="1" Margin="5,40,0,0" VerticalAlignment="Top" />
                     <CheckBox x:Name="checkBoxAzureAllVMs" Content="_All VMs" Grid.Row="1" Grid.Column="1" Margin="5,70,0,0" VerticalAlignment="Top" />
+                    <CheckBox x:Name="checkBoxAzureAVD" Content="_AVD" Grid.Row="1" Grid.Column="1" Margin="5,100,0,0" VerticalAlignment="Top" />
 
                     <RadioButton x:Name="radioButtonAzureConnectByIP" Content="Connect by _IP" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0"  GroupName="GroupBy"/>
                     <RadioButton x:Name="radioButtonAzureConnectByName"   Content="Connect by _Name" Grid.Row="1" Grid.Column="3" Margin="5,70,0,0"  GroupName="GroupBy" IsChecked="True"/>
@@ -426,7 +474,12 @@ drivestoredirect:s:$drivesToRedirect
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" />
+                                <GridViewColumn Header="Location" DisplayMemberBinding="{Binding Location}" />
+                                <GridViewColumn Header="Resource Group" DisplayMemberBinding="{Binding ResourceGroup}" />
+                                <GridViewColumn Header="Subscription" DisplayMemberBinding="{Binding Subscription}" />
+                                <GridViewColumn Header="Created" DisplayMemberBinding="{Binding Created}" />
                                 <GridViewColumn Header="Power State" DisplayMemberBinding="{Binding PowerState}" />
+                                <GridViewColumn Header="Size" DisplayMemberBinding="{Binding Size}" />
                             </GridView>
                         </ListView.View>
                         <ListView.ContextMenu>
@@ -445,15 +498,21 @@ drivestoredirect:s:$drivesToRedirect
                                     <MenuItem Header="Detail" x:Name="AzureDetailContextMenu" />
                                     <MenuItem Header="Rename" x:Name="AzureRenameMenu" />
                                     <MenuItem Header="Reconfigure" x:Name="AzureReconfigureMenu" />
-                                    <MenuItem Header="Enable Nested Virtualisation" x:Name="AzureEnableNestedVirtualisationContextMenu" />
-                                    <MenuItem Header="Enable Resource Metering" x:Name="AzureEnableResourceMeteringContextMenu" />
-                                    <MenuItem Header="Performance Data" x:Name="AzureMeasureContextMenu" />
-                                    <MenuItem Header="Disable Resource Metering" x:Name="AzureDisableResourceMeteringContextMenu" />
                                 </MenuItem>
                                 <MenuItem Header="Delete" x:Name="AzureDeletionContextMenu">
                                     <MenuItem Header="Delete VM" x:Name="AzureDeleteContextMenu" />
                                     <MenuItem Header="Delete VM + Disks" x:Name="AzureDeleteAllContextMenu" />
                                 </MenuItem>
+                                <MenuItem Header="Sessions" x:Name="AzureSessionContextMenu">
+                                    <MenuItem Header="Detail" x:Name="AzureDetailSessionContextMenu" />
+                                    <MenuItem Header="Message" x:Name="AzureMessageSessionContextMenu" />
+                                    <MenuItem Header="Disconnect" x:Name="AzureDisconnectSessionContextMenu" />
+                                    <MenuItem Header="Logoff" x:Name="AzureLogoffSessionContextMenu" />
+                                    <MenuItem Header="Force Logoff" x:Name="AzureForceLogoffSessionContextMenu" />
+                                    <MenuItem Header="Drain Mode On" x:Name="AzureDrainModeOnSessionContextMenu" />
+                                    <MenuItem Header="Drain Mode Off" x:Name="AzureDrainModeOffSessionContextMenu" />
+                                </MenuItem>
+                                <!-- 
                                 <MenuItem Header="Snapshots" x:Name="AzureSnapshotsContextMenu">
                                     <MenuItem Header="Manage" x:Name="AzureManageSnapshotContextMenu" />
                                     <MenuItem Header="Take Snapshot" x:Name="AzureTakeSnapshotContextMenu" />
@@ -464,6 +523,7 @@ drivestoredirect:s:$drivesToRedirect
                                     <MenuItem Header="Brand New" x:Name="AzureNewVMContextMenu" />
                                     <MenuItem Header="Templated" x:Name="AzureNewVMFromTemplateContextMenu" />
                                 </MenuItem>
+                                -->
                                 <MenuItem Header="Name to Clipboard" x:Name="AzureNameToClipboard" />
                                 <MenuItem Header="NICS" x:Name="AzureNICSContextMenu">
                                     <MenuItem Header="Disconnect NIC" x:Name="AzureDisconnectNICContextMenu" />
@@ -479,7 +539,8 @@ drivestoredirect:s:$drivesToRedirect
 
                     <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="5">
                         <Button x:Name="btnLaunchAzureOptions" Content="_Launch" Width="100" Margin="5" />
-                        <Button x:Name="btnLaunchAzureConsole" Content="C_onsole" Width="100" Margin="5" />
+                        <Button x:Name="buttonAzureConnect" Content="C_onnect" Width="100" Margin="5" />
+                                                <Button x:Name="buttonAzureSubscription" Content="_Subscription" Width="100" Margin="5" />
                       <!-- Apply Filter does the same  <Button x:Name="btnConnectAzure" Content="_Connect" Width="100" Margin="5" />   -->
                         <Button x:Name="buttonAzureApplyFilter" Content="Apply _Filter" Width="100" Margin="5" />
                         <Button x:Name="buttonAzureClearFilter" Content="Clea_r Filter" Width="100" Margin="5" />
@@ -1243,30 +1304,312 @@ Function Show-SnapShotWindow
      }
 }
 
-Function Sort-Columns( $control )
+Function Get-GridViewColumnHeader
 {
-    if( $view =  [Windows.Data.CollectionViewSource]::GetDefaultView($control.ItemsSource) )
-    {
-        [string]$direction = 'Ascending'
-        if(  $view.PSObject.Properties[ 'SortDescriptions' ] -and $view.SortDescriptions -and $view.SortDescriptions.Count -gt 0 )
-        {
-	        $sort = $view.SortDescriptions[0].Direction
-	        $direction = if( $sort -and 'Descending' -eq $sort){ 'Ascending' } else { 'Descending' }
-	        $view.SortDescriptions.Clear()
-        }
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        $eventArgs
+    )
 
+    $element = $eventArgs.OriginalSource -as [System.Windows.DependencyObject]
+    while( $element -and $element -isnot [System.Windows.Controls.GridViewColumnHeader] )
+    {
+        $element = [System.Windows.Media.VisualTreeHelper]::GetParent( $element )
+    }
+
+    $element -as [System.Windows.Controls.GridViewColumnHeader]
+}
+
+Function Get-GridViewColumnBindingName
+{
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        $column
+    )
+
+    if( $column.DisplayMemberBinding -and $column.DisplayMemberBinding.Path )
+    {
+        [string]$column.DisplayMemberBinding.Path.Path
+    }
+    elseif( $column.Header )
+    {
+        [string]$column.Header
+    }
+}
+
+Function Sort-Columns
+{
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        $control ,
+
+        [Parameter(Mandatory=$true)]
+        $eventArgs
+    )
+
+    $columnHeader = Get-GridViewColumnHeader -eventArgs $eventArgs
+    if( $null -eq $columnHeader -or $null -eq $columnHeader.Column )
+    {
+        return
+    }
+
+    $itemsSource = $control.ItemsSource
+    if( $null -eq $itemsSource )
+    {
+        $itemsSource = $control.Items
+    }
+
+    if( $view = [Windows.Data.CollectionViewSource]::GetDefaultView( $itemsSource ) )
+    {
         Try
         {
-            [string]$column = $_.OriginalSource.Column.DisplayMemberBinding.Path.Path ## has to be name of the binding, not the header unless no binding
+            [string]$column = $columnHeader.Column.DisplayMemberBinding.Path.Path ## has to be name of the binding, not the header unless no binding
             if( [string]::IsNullOrEmpty( $column ) )
             {
-                $column = $_.OriginalSource.Column.Header
+                $column = $columnHeader.Column.Header
             }
-	        $view.SortDescriptions.Add( ( New-Object ComponentModel.SortDescription( $column , $direction ) ) )
+            if( [string]::IsNullOrEmpty( $column ) )
+            {
+                return
+            }
+
+            [string]$direction = 'Ascending'
+            if( $view.PSObject.Properties[ 'SortDescriptions' ] -and $view.SortDescriptions -and $view.SortDescriptions.Count -gt 0 )
+            {
+                $currentSort = $view.SortDescriptions[0]
+                if( $currentSort.PropertyName -eq $column -and $currentSort.Direction -eq [System.ComponentModel.ListSortDirection]::Ascending )
+                {
+                    $direction = 'Descending'
+                }
+                $view.SortDescriptions.Clear()
+            }
+
+            $view.SortDescriptions.Add( ( New-Object ComponentModel.SortDescription( $column , $direction ) ) )
+            $view.Refresh()
         }
         Catch
         {
         }
+    }
+}
+
+Function Initialize-AzureColumnHeaders
+{
+    $azureGridView = $WPFlistViewAzureVMs.View -as [System.Windows.Controls.GridView]
+    if( $null -eq $azureGridView )
+    {
+        return
+    }
+
+    ForEach( $column in $azureGridView.Columns )
+    {
+        [string]$bindingName = Get-GridViewColumnBindingName -column $column
+        if( -Not [string]::IsNullOrEmpty( $bindingName ) -and -Not $script:azureColumnHeaders.ContainsKey( $bindingName ) )
+        {
+            $script:azureColumnHeaders[ $bindingName ] = [string]$column.Header
+        }
+    }
+}
+
+Function Update-AzureColumnHeaders
+{
+    $azureGridView = $WPFlistViewAzureVMs.View -as [System.Windows.Controls.GridView]
+    if( $null -eq $azureGridView )
+    {
+        return
+    }
+
+    Initialize-AzureColumnHeaders
+
+    ForEach( $column in $azureGridView.Columns )
+    {
+        [string]$bindingName = Get-GridViewColumnBindingName -column $column
+        if( -Not [string]::IsNullOrEmpty( $bindingName ) )
+        {
+            [string]$baseHeader = $script:azureColumnHeaders[ $bindingName ]
+            if( [string]::IsNullOrEmpty( $baseHeader ) )
+            {
+                $baseHeader = [string]$column.Header
+                $script:azureColumnHeaders[ $bindingName ] = $baseHeader
+            }
+
+            if( $script:azureColumnFilters.ContainsKey( $bindingName ) -and -Not [string]::IsNullOrEmpty( $script:azureColumnFilters[ $bindingName ] ) )
+            {
+                $column.Header = "$baseHeader *"
+            }
+            else
+            {
+                $column.Header = $baseHeader
+            }
+        }
+    }
+}
+
+Function Test-AzureColumnFilters
+{
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        $item
+    )
+
+    ForEach( $filter in $script:azureColumnFilters.GetEnumerator() )
+    {
+        if( [string]::IsNullOrEmpty( $filter.Value ) )
+        {
+            continue
+        }
+
+        [string]$itemValue = ''
+        if( $item.PSObject.Properties[ $filter.Key ] )
+        {
+            $itemValue = [string]$item.( $filter.Key )
+        }
+
+        [string]$pattern = $filter.Value
+        if( $pattern -notmatch '[\*\?\[]' )
+        {
+            $pattern = "*$pattern*"
+        }
+
+        if( $itemValue -inotlike $pattern )
+        {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+Function Update-AzureVMLabel
+{
+    [int]$totalCount = $WPFlistViewAzureVMs.Items.Count
+    [int]$visibleCount = $totalCount
+
+    if( $script:azureColumnFilters.Count -gt 0 )
+    {
+        $visibleCount = @( $WPFlistViewAzureVMs.Items | Where-Object { Test-AzureColumnFilters -item $_ } ).Count
+    }
+
+    if( $visibleCount -eq $totalCount )
+    {
+        $WPFlabelAzureVMs.Content = "$totalCount VMs"
+    }
+    else
+    {
+        $WPFlabelAzureVMs.Content = "$visibleCount of $totalCount VMs"
+    }
+}
+
+Function Apply-AzureColumnFilters
+{
+    $itemsSource = $WPFlistViewAzureVMs.ItemsSource
+    if( $null -eq $itemsSource )
+    {
+        $itemsSource = $WPFlistViewAzureVMs.Items
+    }
+
+    if( $view = [Windows.Data.CollectionViewSource]::GetDefaultView( $itemsSource ) )
+    {
+        if( $script:azureColumnFilters.Count -gt 0 )
+        {
+            $view.Filter = [Predicate[object]]{ param( $item ) Test-AzureColumnFilters -item $item }
+        }
+        else
+        {
+            $view.Filter = $null
+        }
+        $view.Refresh()
+    }
+
+    Update-AzureColumnHeaders
+    Update-AzureVMLabel
+}
+
+Function Set-AzureColumnFilter
+{
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        $columnHeader
+    )
+
+    if( $null -eq $columnHeader.Column )
+    {
+        return
+    }
+
+    [string]$bindingName = Get-GridViewColumnBindingName -column $columnHeader.Column
+    if( [string]::IsNullOrEmpty( $bindingName ) )
+    {
+        return
+    }
+
+    Initialize-AzureColumnHeaders
+    [string]$headerText = $script:azureColumnHeaders[ $bindingName ]
+    if( [string]::IsNullOrEmpty( $headerText ) )
+    {
+        $headerText = [string]$columnHeader.Column.Header
+    }
+
+    $textInputWindow = New-Object -TypeName System.Windows.Window
+    $textInputWindow.Title = "Filter $headerText"
+    $textInputWindow.SizeToContent = [System.Windows.SizeToContent]::WidthAndHeight
+    $textInputWindow.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $textInputWindow.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+
+    if( $null -ne $mainWindow )
+    {
+        $textInputWindow.Owner = $mainWindow
+    }
+
+    $textInputBox = New-Object -TypeName System.Windows.Controls.TextBox
+    $textInputBox.Width = 340
+    $textInputBox.Margin = New-Object -TypeName System.Windows.Thickness -ArgumentList 10
+    $textInputBox.Text = if( $script:azureColumnFilters.ContainsKey( $bindingName ) ) { $script:azureColumnFilters[ $bindingName ] } else { '' }
+
+    $textInputWindow.Content = $textInputBox
+
+    $textInputWindow.Add_ContentRendered({
+        $textInputBox.Focus()
+        $textInputBox.SelectAll()
+    })
+
+    $textInputWindow.Add_PreviewKeyDown({
+        param( $windowObject , $keyEventArgs )
+
+        if( $keyEventArgs.Key -eq [System.Windows.Input.Key]::Enter )
+        {
+            $windowObject.DialogResult = $true
+            $keyEventArgs.Handled = $true
+            $windowObject.Close()
+        }
+        elseif( $keyEventArgs.Key -eq [System.Windows.Input.Key]::Escape )
+        {
+            $windowObject.DialogResult = $false
+            $keyEventArgs.Handled = $true
+            $windowObject.Close()
+        }
+    })
+
+    if( $textInputWindow.ShowDialog() )
+    {
+        [string]$filterValue = $textInputBox.Text.Trim()
+        if( [string]::IsNullOrEmpty( $filterValue ) )
+        {
+            if( $script:azureColumnFilters.ContainsKey( $bindingName ) )
+            {
+                $script:azureColumnFilters.Remove( $bindingName )
+            }
+        }
+        else
+        {
+            $script:azureColumnFilters[ $bindingName ] = $filterValue
+        }
+        Apply-AzureColumnFilters
     }
 }
 
@@ -1417,6 +1760,19 @@ Function New-RemoteSession
     
         [string]$rdpFileContents = $ExecutionContext.InvokeCommand.ExpandString( $rdpTemplate )
 
+        [int]$keyboardHook = 0
+        if( $WPFradioKeysRemote.IsChecked )
+        {
+            $keyboardHook = 1
+        }
+        elseif( $WPFradioKeysFullScreen.IsChecked )
+        {
+            $keyboardHook = 2
+        }
+        $rdpFileContents += "`nkeyboardhook:i:$keyboardHook`n"
+
+    ##### TDODO implement multi monitor, etc mstsc options
+    
         if( $usemsrdc )
         {
            $exe = Get-Msrdc
@@ -1471,7 +1827,7 @@ Function New-RemoteSession
         {
             Write-Verbose -Message "Already have window `"$windowTitle`" in process $($existingWindows.PID)"
             
-            $otherprocess = Get-Process -Id $existingWindows.PID
+            $otherprocess = Get-Process -Id $existingWindows.PID | Where-Object Name -in @( 'mstsc' , 'msrdc' , 'vmconnect' )
             try
             {
                 $answer = [Windows.MessageBox]::Show(  "Activate Existing Window ?`nLaunched $($otherprocess.StartTime.ToString('G'))" , "Already Connected to $address" , 'YesNoCancel' ,'Question' )
@@ -2248,6 +2604,719 @@ namespace Resolution
 } 
 "@
 
+Function Add-AzureVMsToListView
+{
+    Param
+    (
+        [string]$filter ,
+        [bool]$regex ,
+        [bool]$allVMs
+    )   
+    # Keep HostPool column visibility in sync with the AVD checkbox state.
+    Set-AzureHostPoolColumn -showHostPool ([bool]$WPFcheckBoxAzureAVD.IsChecked)
+
+    [string]$powerState = '.'
+    if( -Not $allVMs )
+    {
+        $powerState = 'Running'
+    }
+    $azureError = $null
+    Import-Module -Name Az.Compute -Verbose:$false
+    $tenant = $null
+    $tenant = Get-AZTenant
+    if( $null -ne $tenant )
+    {
+        $wpftextBoxAzureTenant.Text = "{0} ({1})" -f $tenant.Name, $tenant.DefaultDomain
+    }
+    else
+    {
+        $wpftextBoxAzureTenant.Text = ''
+    }
+    Write-Verbose "$(Get-Date -Format G): Getting Azure VMs (all=$allVMs, filter=$filter, regex=$regex)"
+    $script:vms = @( Get-AZVM -ErrorVariable azureError -Status | Where-Object {  $_.PowerState -match $powerState -and  (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and ( [string]::IsNullOrEmpty( $filter ) -or $_.Name -like $filter ))) } | Sort-Object -Property Name )
+    if( $azureError )
+    {
+        [void][Windows.MessageBox]::Show( $azureError , 'Azure Error' , 'Ok' ,'Error' )
+    }
+    Write-Verbose "$(Get-Date -Format G): Got $($vms.Count) Azure VMs (all=$allVMs, filter=$filter, regex=$regex)"
+    $WPFlistViewAzureVMs.Items.Clear()
+    if( $script:vms.count -eq 0 )
+    {
+        Apply-AzureColumnFilters
+        $WPFlabelAzureVMs.Content = "0 VMs"
+        return
+    }
+    [array]$hostpools = @{}
+    [hashtable]$sessionHosts = @{}
+    [hashtable]$hostPoolWorkspaceLookup = @{}
+    [hashtable]$hostPoolIdsByName = @{}
+    if( $WPFcheckBoxAzureAVD.IsChecked )
+    {
+        Import-Module -Name Az.DesktopVirtualization -Verbose:$false
+        $hostpools = @( Get-AZWVDHostPool )
+        [hashtable]$workspaceByApplicationGroupId = @{}
+        [array]$workspaces = @( Get-AZWVDWorkspace )
+        [array]$applicationGroups = @( Get-AZWVDApplicationGroup )
+
+        ForEach( $workspace in $workspaces )
+        {
+            [string]$workspaceFriendlyName = $workspace.FriendlyName
+            if( [string]::IsNullOrWhiteSpace( $workspaceFriendlyName ) )
+            {
+                $workspaceFriendlyName = $workspace.Name
+            }
+
+            ForEach( $applicationGroupReference in @( $workspace.ApplicationGroupReference ) )
+            {
+                if( -Not [string]::IsNullOrWhiteSpace( $applicationGroupReference ) )
+                {
+                    $workspaceByApplicationGroupId[ $applicationGroupReference.ToLowerInvariant() ] = [pscustomobject]@{
+                        WorkspaceName = $workspace.Name
+                        WorkspaceFriendlyName = $workspaceFriendlyName
+                    }
+                }
+            }
+        }
+
+        ForEach( $applicationGroup in $applicationGroups )
+        {
+            [string]$hostPoolId = $applicationGroup.HostPoolArmPath
+            if( [string]::IsNullOrWhiteSpace( $hostPoolId ) )
+            {
+                continue
+            }
+
+            if( [string]::IsNullOrWhiteSpace( $applicationGroup.Id ) )
+            {
+                continue
+            }
+
+            $workspaceInfo = $workspaceByApplicationGroupId[ $applicationGroup.Id.ToLowerInvariant() ]
+            if( $null -ne $workspaceInfo -and -Not $hostPoolWorkspaceLookup.ContainsKey( $hostPoolId.ToLowerInvariant() ) )
+            {
+                $hostPoolWorkspaceLookup[ $hostPoolId.ToLowerInvariant() ] = $workspaceInfo
+            }
+        }
+
+        Write-Verbose "Got $($hostpools.Count) Azure Virtual Desktop Host Pools"
+        ForEach( $hostpool in $hostpools )
+        {
+              if( -Not [string]::IsNullOrWhiteSpace( $hostpool.Name ) -and -Not [string]::IsNullOrWhiteSpace( $hostpool.Id ) )
+              {
+                    $hostPoolIdsByName[ $hostpool.Name ] = $hostpool.Id
+              }
+
+           Get-AZWVDSessionHost -HostPoolName $hostpool.Name -ResourceGroupName $hostpool.ResourceGroupName | Select-Object -Property *,@{n='HostPool';e={$Hostpool.name}} -PipelineVariable sessionHost | ForEach-Object `
+           {
+                [string]$sessionHostVmId = $sessionHost.VirtualMachineId
+                if( [string]::IsNullOrWhiteSpace( $sessionHostVmId ) )
+                {
+                    continue
+                }
+
+                $sessionHostVmId = $sessionHostVmId.ToLowerInvariant()
+                if( -Not $sessionHosts.ContainsKey( $sessionHostVmId ) )
+                {
+                    $sessionHosts[ $sessionHostVmId ] = $sessionHost
+                }
+           }
+        }
+        Write-Verbose "Got $($sessionHosts.Count) session hosts across $($hostpools.Count) host pools and $($hostPoolWorkspaceLookup.Count) host pool workspace mappings"
+    }
+    [array]$subscriptions = @( Get-AZSubscription )
+    ForEach( $vm in $vms )
+    {
+        [string]$subscriptionId = $vm.Id -replace '^/subscriptions/([^/]+)/.*$' , '$1' 
+        $item = [pscustomobject]@{ 
+            Name = $vm.Name
+            PowerState = $vm.PowerState
+            Location = $vm.Location
+            ResourceGroup = $vm.ResourceGroupName
+            Size = $vm.HardwareProfile.VmSize
+            Subscription = $subscriptions | Where-Object Id -eq $subscriptionId | Select-Object -ExpandProperty Name
+            Created = $vm.TimeCreated
+        }
+        if( $WPFCheckBoxAzureAVD.IsChecked )
+        {
+            [string]$vmId = $vm.vmid
+            if( -Not [string]::IsNullOrWhiteSpace( $vmId ) )
+            {
+                $vmId = $vmId.ToLowerInvariant()
+            }
+
+            if( -Not [string]::IsNullOrWhiteSpace( $vmId ) -and ( $sessionHost = $sessionHosts[ $vmId ] ) )
+            {
+                [string]$hostPoolId = $hostPoolIdsByName[ $sessionHost.HostPool ]
+                $workspaceInfo = $null
+                if( -Not [string]::IsNullOrWhiteSpace( $hostPoolId ) )
+                {
+                    $workspaceInfo = $hostPoolWorkspaceLookup[ $hostPoolId.ToLowerInvariant() ]
+                }
+
+                Add-Member -InputObject $item -NotePropertyMembers @{
+                     'HostPool' = $sessionHost.HostPool
+                     'Workspace Name' = if( $null -ne $workspaceInfo ) { $workspaceInfo.WorkspaceName } else { $null }
+                     'Workspace Friendly Name' = if( $null -ne $workspaceInfo ) { $workspaceInfo.WorkspaceFriendlyName } else { $null }
+                     'Sessions' = $sessionHost.Session
+                     'AVD Status' = $sessionHost.Status
+                     'Allow New Session' = $sessionHost.AllowNewSession
+                }
+            }
+        }
+        $WPFlistViewAzureVMs.Items.Add( $item )
+        Write-Verbose -Message "Added $($vm.Name)"
+    }
+    Apply-AzureColumnFilters
+}
+
+Function Set-AzureHostPoolColumn
+{
+    Param
+    (
+        [bool]$showHostPool
+    )
+
+    $azureGridView = $WPFlistViewAzureVMs.View -as [System.Windows.Controls.GridView]
+    if( $null -eq $azureGridView )
+    {
+        return
+    }
+
+    [array]$avdColumns = @(
+        @{ Header = 'HostPool'   ; Binding = 'HostPool' } ,
+        @{ Header = 'Workspace Name' ; Binding = 'Workspace Name' } ,
+        @{ Header = 'Workspace Friendly Name' ; Binding = 'Workspace Friendly Name' } ,
+        @{ Header = 'Sessions'   ; Binding = 'Sessions' } ,
+        @{ Header = 'AVD Status' ; Binding = 'AVD Status' } ,
+        @{ Header = 'Allow New Session' ; Binding = 'Allow New Session' }
+    )
+
+    if( $showHostPool )
+    {
+        ForEach( $columnDefinition in $avdColumns )
+        {
+            $existingColumn = $azureGridView.Columns | Where-Object { $_.Header -eq $columnDefinition.Header } | Select-Object -First 1
+            if( $null -eq $existingColumn )
+            {
+                $newColumn = New-Object -TypeName System.Windows.Controls.GridViewColumn
+                $newColumn.Header = $columnDefinition.Header
+                $newColumn.DisplayMemberBinding = New-Object -TypeName System.Windows.Data.Binding -ArgumentList $columnDefinition.Binding
+                [void]$azureGridView.Columns.Add( $newColumn )
+            }
+        }
+    }
+    else
+    {
+        ForEach( $columnDefinition in $avdColumns )
+        {
+            $existingColumn = $azureGridView.Columns | Where-Object { $_.Header -eq $columnDefinition.Header } | Select-Object -First 1
+            if( $null -ne $existingColumn )
+            {
+                [void]$azureGridView.Columns.Remove( $existingColumn )
+            }
+        }
+    }
+
+    Update-AzureColumnHeaders
+}
+
+Function Set-AzureSessionMenuState
+{
+    Param
+    (
+        [bool]$avdEnabled
+    )
+
+    if( $null -ne $WPFAzureSessionContextMenu )
+    {
+        $WPFAzureSessionContextMenu.IsEnabled = $avdEnabled
+    }
+}
+
+Function Select-AzureSubscription
+{
+    Import-Module -Name Az.Accounts -Verbose:$false
+
+    if( $null -eq ( Get-AzContext -ErrorAction SilentlyContinue ) )
+    {
+        $null = Connect-AzAccount
+        if( $null -eq ( Get-AzContext -ErrorAction SilentlyContinue ) )
+        {
+            return
+        }
+    }
+
+    [array]$subscriptions = @( Get-AZSubscription | Sort-Object -Property Name )
+
+    if( $subscriptions.Count -eq 0 )
+    {
+        [void][Windows.MessageBox]::Show( $mainWindow , 'No Azure subscriptions found for the current account' , 'Azure Subscription' , 'Ok' ,'Information' )
+        return
+    }
+
+    $selectionWindow = New-Object -TypeName System.Windows.Window
+    $selectionWindow.Title = 'Select Azure Subscription'
+    $selectionWindow.Width = 640
+    $selectionWindow.Height = 420
+    $selectionWindow.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+
+    if( $null -ne $mainWindow )
+    {
+        $selectionWindow.Owner = $mainWindow
+    }
+
+    $grid = New-Object -TypeName System.Windows.Controls.Grid
+    $listRowDefinition = New-Object -TypeName System.Windows.Controls.RowDefinition
+    $listRowDefinition.Height = New-Object -TypeName System.Windows.GridLength -ArgumentList 1,([System.Windows.GridUnitType]::Star)
+    $null = $grid.RowDefinitions.Add( $listRowDefinition )
+    $buttonRowDefinition = New-Object -TypeName System.Windows.Controls.RowDefinition
+    $buttonRowDefinition.Height = [System.Windows.GridLength]::Auto
+    $null = $grid.RowDefinitions.Add( $buttonRowDefinition )
+
+    $listBox = New-Object -TypeName System.Windows.Controls.ListBox
+    $listBox.Margin = New-Object -TypeName System.Windows.Thickness -ArgumentList 10
+    $listBox.DisplayMemberPath = 'Name'
+    $subscriptions | ForEach-Object { [void]$listBox.Items.Add( $_ ) }
+    if( $null -ne $script:azureSelectedSubscription )
+    {
+        $existing = $subscriptions | Where-Object { $_.Id -eq $script:azureSelectedSubscription.Id } | Select-Object -First 1
+        if( $null -ne $existing )
+        {
+            $listBox.SelectedItem = $existing
+        }
+    }
+    if( $null -eq $listBox.SelectedItem -and $listBox.Items.Count -gt 0 )
+    {
+        $listBox.SelectedIndex = 0
+    }
+    [System.Windows.Controls.Grid]::SetRow( $listBox , 0 )
+    [void]$grid.Children.Add( $listBox )
+
+    $buttonPanel = New-Object -TypeName System.Windows.Controls.StackPanel
+    $buttonPanel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $buttonPanel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+    $buttonPanel.Margin = New-Object -TypeName System.Windows.Thickness -ArgumentList 10
+
+    $okButton = New-Object -TypeName System.Windows.Controls.Button
+    $okButton.Content = 'OK'
+    $okButton.MinWidth = 80
+    $okButton.Margin = New-Object -TypeName System.Windows.Thickness -ArgumentList 0,0,8,0
+    $okButton.IsDefault = $true
+    $okButton.Add_Click({
+        if( $null -ne $listBox.SelectedItem )
+        {
+            $selectionWindow.DialogResult = $true
+            $selectionWindow.Close()
+        }
+    })
+
+    $cancelButton = New-Object -TypeName System.Windows.Controls.Button
+    $cancelButton.Content = 'Cancel'
+    $cancelButton.MinWidth = 80
+    $cancelButton.IsCancel = $true
+
+    [void]$buttonPanel.Children.Add( $okButton )
+    [void]$buttonPanel.Children.Add( $cancelButton )
+    [System.Windows.Controls.Grid]::SetRow( $buttonPanel , 1 )
+    [void]$grid.Children.Add( $buttonPanel )
+
+    $listBox.Add_MouseDoubleClick({
+        if( $null -ne $listBox.SelectedItem )
+        {
+            $selectionWindow.DialogResult = $true
+            $selectionWindow.Close()
+        }
+    })
+
+    $selectionWindow.Content = $grid
+    if( -Not $selectionWindow.ShowDialog() )
+    {
+        return
+    }
+
+    $selectedSubscription = $listBox.SelectedItem
+    if( $null -eq $selectedSubscription )
+    {
+        return
+    }
+
+    try
+    {
+        $null = Set-AzContext -SubscriptionId $selectedSubscription.Id -ErrorAction Stop
+        $script:azureSelectedSubscription = $selectedSubscription
+        Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+    }
+    catch
+    {
+        [void][Windows.MessageBox]::Show( $mainWindow , "Failed to set subscription context to $($selectedSubscription.Name)`n$($_.Exception.Message)" , 'Azure Subscription' , 'Ok' ,'Error' )
+    }
+}
+
+Function Get-AzureAVDSessionHost
+{
+    Param
+    (
+        [Parameter(Mandatory)][pscustomobject]$selection
+    )
+
+    if( [string]::IsNullOrEmpty( $selection.HostPool ) )
+    {
+        throw "VM $($selection.Name) is not associated with an AVD host pool"
+    }
+
+    Import-Module -Name Az.DesktopVirtualization -Verbose:$false
+    [array]$sessionHosts = @( Get-AZWVDSessionHost -HostPoolName $selection.HostPool -ResourceGroupName $selection.ResourceGroup -ErrorAction Stop )
+
+    $sessionHost = $sessionHosts | Where-Object {
+        [string]$sessionHostName = $_.Name -replace '^.*/' , ''
+        [string]$sessionHostVmName = $sessionHostName -replace '\..*$' , ''
+        $sessionHostVmName -ieq $selection.Name
+    } | Select-Object -First 1
+
+    if( $null -eq $sessionHost )
+    {
+        throw "Failed to find AVD session host for $($selection.Name) in host pool $($selection.HostPool)"
+    }
+
+    $sessionHost
+}
+
+Function Get-AzureAVDUserSessions
+{
+    Param
+    (
+        [Parameter(Mandatory)][string]$sessionHostResourceId
+    )
+
+    $response = Invoke-AzRestMethod -Method GET -Path "$sessionHostResourceId/userSessions?api-version=$AVDAPIversion" -ErrorAction Stop
+    if( [string]::IsNullOrEmpty( $response.Content ) )
+    {
+        return @()
+    }
+
+    [array]$sessions = @(( $response.Content | ConvertFrom-Json ).value)
+    if( $null -eq $sessions )
+    {
+        return @()
+    }
+
+    $sessions
+}
+
+Function Get-AzureAVDSessionMessage
+{
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'AVD Session Message'
+    $form.Size = New-Object System.Drawing.Size(640, 320)
+    $form.StartPosition = 'CenterScreen'
+
+    $labelTitle = New-Object System.Windows.Forms.Label
+    $labelTitle.Text = 'Message title'
+    $labelTitle.AutoSize = $true
+    $labelTitle.Location = New-Object System.Drawing.Point(12, 12)
+
+    $textTitle = New-Object System.Windows.Forms.TextBox
+    $textTitle.Location = New-Object System.Drawing.Point(12, 32)
+    $textTitle.Size = New-Object System.Drawing.Size(600, 24)
+    $textTitle.Text = 'Admin Message'
+
+    $labelBody = New-Object System.Windows.Forms.Label
+    $labelBody.Text = 'Message body'
+    $labelBody.AutoSize = $true
+    $labelBody.Location = New-Object System.Drawing.Point(12, 66)
+
+    $textBody = New-Object System.Windows.Forms.TextBox
+    $textBody.Location = New-Object System.Drawing.Point(12, 86)
+    $textBody.Size = New-Object System.Drawing.Size(600, 150)
+    $textBody.Multiline = $true
+    $textBody.ScrollBars = 'Vertical'
+    $textBody.Text = 'Please save your work and sign out.'
+
+    $buttonOk = New-Object System.Windows.Forms.Button
+    $buttonOk.Text = 'OK'
+    $buttonOk.Size = New-Object System.Drawing.Size(90, 30)
+    $buttonOk.Location = New-Object System.Drawing.Point(432, 246)
+    $buttonOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+
+    $buttonCancel = New-Object System.Windows.Forms.Button
+    $buttonCancel.Text = 'Cancel'
+    $buttonCancel.Size = New-Object System.Drawing.Size(90, 30)
+    $buttonCancel.Location = New-Object System.Drawing.Point(522, 246)
+    $buttonCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+    [void]$form.Controls.Add( $labelTitle )
+    [void]$form.Controls.Add( $textTitle )
+    [void]$form.Controls.Add( $labelBody )
+    [void]$form.Controls.Add( $textBody )
+    [void]$form.Controls.Add( $buttonOk )
+    [void]$form.Controls.Add( $buttonCancel )
+
+    $form.AcceptButton = $buttonOk
+    $form.CancelButton = $buttonCancel
+
+    if( $form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK )
+    {
+        return $null
+    }
+
+    [string]$messageTitle = $textTitle.Text.Trim()
+    [string]$messageBody = $textBody.Text.Trim()
+    if( [string]::IsNullOrEmpty( $messageTitle ) -or [string]::IsNullOrEmpty( $messageBody ) )
+    {
+        return $null
+    }
+
+    [pscustomobject]@{
+        Title = $messageTitle
+        Body = $messageBody
+    }
+}
+
+Function Invoke-AzureAVDSessionOperation
+{
+    Param
+    (
+        [Parameter(Mandatory)][array]$userSessions ,
+        [Parameter(Mandatory)][string]$operation ,
+        [pscustomobject]$azureSessionMessage
+    )
+
+    [bool]$refreshAzureList = $false
+
+    if( $operation -ieq 'Azure_MessageSession' -and $null -eq $azureSessionMessage )
+    {
+        $azureSessionMessage = Get-AzureAVDSessionMessage
+        if( $null -eq $azureSessionMessage )
+        {
+            return [pscustomobject]@{ RefreshAzureList = $false ; AzureSessionMessage = $null }
+        }
+    }
+
+    ForEach( $userSession in $userSessions )
+    {
+        if( $operation -ieq 'Azure_DisconnectSession' )
+        {
+            $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/disconnect?api-version=$AVDAPIversion" -ErrorAction Stop
+            $refreshAzureList = $true
+        }
+        elseif( $operation -ieq 'Azure_LogoffSession' )
+        {
+            $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion" -ErrorAction Stop
+            $refreshAzureList = $true
+        }
+        elseif( $operation -ieq 'Azure_ForceLogoffSession' )
+        {
+            $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion&force=true" -ErrorAction Stop
+            $refreshAzureList = $true
+        }
+        elseif( $operation -ieq 'Azure_MessageSession' )
+        {
+            [string]$payload = (@{ messageTitle = $azureSessionMessage.Title ; messageBody = $azureSessionMessage.Body } | ConvertTo-Json -Compress)
+            $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/sendMessage?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
+        }
+    }
+
+    [pscustomobject]@{
+        RefreshAzureList = $refreshAzureList
+        AzureSessionMessage = $azureSessionMessage
+    }
+}
+
+Function Confirm-AzureAVDSessionOperation
+{
+    Param
+    (
+        [Parameter(Mandatory)][array]$userSessions ,
+        [Parameter(Mandatory)][string]$operation
+    )
+
+    if( $operation -notin @( 'Azure_DisconnectSession' , 'Azure_LogoffSession' , 'Azure_ForceLogoffSession' ) )
+    {
+        return $true
+    }
+
+    [string]$actionName = $operation -replace '^Azure_' , '' -replace 'Session$' , '' -creplace '([a-zA-Z])([A-Z])' , '$1 $2'
+    [string]$prompt = if( $userSessions.Count -gt 1 )
+    {
+        "Are you sure you want to $actionName $($userSessions.Count) sessions?"
+    }
+    else
+    {
+        [string]$sessionUser = $userSessions[0].properties.userPrincipalName
+        [string]$sessionName = $userSessions[0].Name -replace '^.*/' , ''
+        "Are you sure you want to $actionName session $sessionName for $sessionUser?"
+    }
+
+    return [Windows.MessageBox]::Show( $mainWindow , $prompt , 'Confirm Session Operation' , 'YesNo' ,'Question' ) -ieq 'Yes'
+}
+
+Function Show-AzureAVDSessionListView
+{
+    Param
+    (
+        [Parameter(Mandatory)][array]$selectedVMs
+    )
+
+    [array]$sessionRows = @()
+    ForEach( $selection in $selectedVMs )
+    {
+        try
+        {
+            $sessionHost = Get-AzureAVDSessionHost -selection $selection
+            [array]$userSessions = @( Get-AzureAVDUserSessions -sessionHostResourceId $sessionHost.Id )
+
+            ForEach( $userSession in $userSessions )
+            {
+                $sessionRows += [pscustomobject]@{
+                    'Session Id' = $userSession.Name -replace '^.*/' , ''
+                    User = $userSession.properties.userPrincipalName
+                    State = $userSession.properties.sessionState
+                    'Create Time' = $userSession.properties.createTime
+                    VM = $selection.Name
+                    HostPool = $selection.HostPool
+                    SessionObject = $userSession
+                }
+            }
+        }
+        catch
+        {
+            Write-Warning -Message "Azure AVD session retrieval failed for $($selection.Name) : $_"
+            [void][Windows.MessageBox]::Show( $mainWindow , "Azure AVD session retrieval failed for $($selection.Name)`n$($_.Exception.Message)" , 'Azure AVD Sessions' , 'Ok' ,'Error' )
+        }
+    }
+
+    if( $sessionRows.Count -eq 0 )
+    {
+        [void][Windows.MessageBox]::Show( $mainWindow , 'No active user sessions found on the selected session hosts' , 'Azure AVD Sessions' , 'Ok' ,'Information' )
+        return
+    }
+
+    $detailForm = New-Object System.Windows.Forms.Form
+    $detailForm.Text = 'AVD Sessions'
+    $detailForm.Size = New-Object System.Drawing.Size(980, 520)
+    $detailForm.StartPosition = 'CenterScreen'
+
+    $sessionListView = New-Object System.Windows.Forms.ListView
+    $sessionListView.Dock = 'Fill'
+    $sessionListView.View = [System.Windows.Forms.View]::Details
+    $sessionListView.FullRowSelect = $true
+    $sessionListView.GridLines = $true
+    $sessionListView.MultiSelect = $true
+    $sessionListView.HideSelection = $false
+
+    [void]$sessionListView.Columns.Add( 'Session Id' , 120 )
+    [void]$sessionListView.Columns.Add( 'User' , 260 )
+    [void]$sessionListView.Columns.Add( 'State' , 110 )
+    [void]$sessionListView.Columns.Add( 'Create Time' , 180 )
+    [void]$sessionListView.Columns.Add( 'VM' , 150 )
+    [void]$sessionListView.Columns.Add( 'HostPool' , 150 )
+
+    ForEach( $sessionRow in $sessionRows )
+    {
+        $item = New-Object System.Windows.Forms.ListViewItem( [string]$sessionRow.'Session Id' )
+        [void]$item.SubItems.Add( [string]$sessionRow.User )
+        [void]$item.SubItems.Add( [string]$sessionRow.State )
+        [void]$item.SubItems.Add( [string]$sessionRow.'Create Time' )
+        [void]$item.SubItems.Add( [string]$sessionRow.VM )
+        [void]$item.SubItems.Add( [string]$sessionRow.HostPool )
+        $item.Tag = $sessionRow.SessionObject
+        [void]$sessionListView.Items.Add( $item )
+    }
+
+    $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    $menuItemMessage = New-Object System.Windows.Forms.ToolStripMenuItem 'Message'
+    $menuItemDisconnect = New-Object System.Windows.Forms.ToolStripMenuItem 'Disconnect'
+    $menuItemLogoff = New-Object System.Windows.Forms.ToolStripMenuItem 'Logoff'
+    $menuItemForceLogoff = New-Object System.Windows.Forms.ToolStripMenuItem 'Force Logoff'
+    [void]$contextMenu.Items.AddRange( @( $menuItemMessage , $menuItemDisconnect , $menuItemLogoff , $menuItemForceLogoff ) )
+    $sessionListView.ContextMenuStrip = $contextMenu
+
+    [pscustomobject]$sessionMessage = $null
+    [bool]$refreshAzureList = $false
+
+    $invokeFromListView = {
+        Param
+        (
+            [string]$sessionOperation
+        )
+
+        [array]$targetSessions = @()
+        if( $sessionListView.SelectedItems.Count -gt 0 )
+        {
+            ForEach( $selectedItem in $sessionListView.SelectedItems )
+            {
+                if( $null -ne $selectedItem.Tag )
+                {
+                    $targetSessions += $selectedItem.Tag
+                }
+            }
+        }
+        else
+        {
+            ForEach( $listItem in $sessionListView.Items )
+            {
+                if( $null -ne $listItem.Tag )
+                {
+                    $targetSessions += $listItem.Tag
+                }
+            }
+        }
+
+        if( $targetSessions.Count -eq 0 )
+        {
+            return
+        }
+
+        if( -Not ( Confirm-AzureAVDSessionOperation -userSessions $targetSessions -operation $sessionOperation ) )
+        {
+            return
+        }
+
+        try
+        {
+            $result = Invoke-AzureAVDSessionOperation -userSessions $targetSessions -operation $sessionOperation -azureSessionMessage $sessionMessage
+            $sessionMessage = $result.AzureSessionMessage
+            if( $result.RefreshAzureList )
+            {
+                $refreshAzureList = $true
+                [hashtable]$targetSessionIds = @{}
+                ForEach( $targetSession in $targetSessions )
+                {
+                    $targetSessionIds[ $targetSession.Id ] = $true
+                }
+
+                for( [int]$index = $sessionListView.Items.Count - 1 ; $index -ge 0 ; $index-- )
+                {
+                    $listItem = $sessionListView.Items[ $index ]
+                    if( $null -ne $listItem.Tag -and $targetSessionIds.ContainsKey( $listItem.Tag.Id ) )
+                    {
+                        $sessionListView.Items.RemoveAt( $index )
+                    }
+                }
+            }
+        }
+        catch
+        {
+            Write-Warning -Message "Azure AVD session operation failed : $_"
+            [void][Windows.MessageBox]::Show( $mainWindow , "Azure AVD session operation failed`n$($_.Exception.Message)" , 'Azure AVD Sessions' , 'Ok' ,'Error' )
+        }
+    }
+
+    $menuItemMessage.Add_Click({ & $invokeFromListView 'Azure_MessageSession' })
+    $menuItemDisconnect.Add_Click({ & $invokeFromListView 'Azure_DisconnectSession' })
+    $menuItemLogoff.Add_Click({ & $invokeFromListView 'Azure_LogoffSession' })
+    $menuItemForceLogoff.Add_Click({ & $invokeFromListView 'Azure_ForceLogoffSession' })
+
+    $detailForm.Controls.Add( $sessionListView )
+    $detailForm.Add_Shown({ $detailForm.Activate() })
+    [void]$detailForm.ShowDialog()
+
+    if( $refreshAzureList )
+    {
+        Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+    }
+}
+
 Function Add-VMwareVMsToListView
 {
     Param
@@ -2256,7 +3325,9 @@ Function Add-VMwareVMsToListView
         [bool]$regex
     )
     $vmwareError = $null
+    $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
     $script:vms = @( Get-VM -ErrorVariable vmwareError -norecursion | Where-Object { $_.PowerState -ieq 'PoweredOn' -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and ( [string]::IsNullOrEmpty( $filter ) -or $_.Name -like $filter ))) } | Sort-Object -Property Name | Select-Object -ExpandProperty Guest )
+    $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty) 
     if( $vmwareError )
     {
         [void][Windows.MessageBox]::Show( $vmwareError , 'VMware Error' , 'Ok' ,'Error' )
@@ -2288,7 +3359,9 @@ Function Add-HyperVVMsToListView
         $powerState = 'Running'
     }
     ## module qualifying in case clash with VMware PowerCLI. Deal with multiple hosts
+    $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
     $script:vms = @( Hyper-V\Get-VM -ErrorVariable hyperVError -ComputerName ($hyperVhost -split ',') | Where-Object { $_.State -match $powerState -and (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and ( [string]::IsNullOrEmpty( $filter ) -or $_.Name -like $filter ))) } | Sort-Object -Property Name )
+    $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty)
     if( $hyperVError )
     {
         [void][Windows.MessageBox]::Show( $hyperVError , "Hyper-V Error from $hyperVhost" , 'Ok' ,'Error' )
@@ -2504,6 +3577,12 @@ Function Process-Action
             return
         }
 
+        if( $operation -ieq 'Azure_DetailSession' )
+        {
+            Show-AzureAVDSessionListView -selectedVMs $selectedVMs
+            return
+        }
+
         [hashtable]$hypervParameters = @{}
         if( -Not [string]::IsNullOrEmpty( $WPFtextBoxHyperVHost.Text ) )
         {
@@ -2512,7 +3591,17 @@ Function Process-Action
         [string]$answer = $null
         [int]$loopIterations = 0
         [hashtable]$clipboardParameters = @{}
-
+        [bool]$refreshAzureList = $false
+        [pscustomobject]$azureSessionMessage = $null
+        [hashtable]$async = @{}
+        if( $asyncActions )
+        {
+            $async.Add( 'AsJob' , $true )
+        }
+        else
+        {
+            $async.Add( 'PassThru' , $true )
+        }
         [array]$jobs = @( ForEach( $selection in $selectedVMs )
         {
             $loopIterations++
@@ -2523,7 +3612,7 @@ Function Process-Action
                 $GUIobject.Items.RemoveAt( $selection )
                 continue
             }
-            if( $Operation -match 'PowerOn|Detail|Resume|Clipboard|TakeSnapshot|((Manage|Revert|Delete).*Snapshot)' ) ## don't need to prompt or will prompt with more information later
+            if( $Operation -match 'PowerOn|Detail|Resume|Clipboard|TakeSnapshot|MessageSession|((Manage|Revert|Delete).*Snapshot)' ) ## don't need to prompt or will prompt with more information later
             {
                 $answer = 'yes'
             }
@@ -2532,12 +3621,13 @@ Function Process-Action
                 [string]$buttons = 'YesNo'
                 [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
                 {
-                    "Are you sure you want to $($operation -replace '^HyperV_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($selection.Name) Only or Cancel for None"
+                    ## action may be prefixed with the hypervisor eg HyperV or Azure so remove that since on that specific tab anyway
+                    "Are you sure you want to $($operation -replace '^[^_]*_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($selection.Name) Only or Cancel for None"
                     $buttons = 'YesNoCancel'
                 }
                 else
                 {
-                    "Are you sure you want to $($operation -replace '^HyperV_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selection.Name)?"
+                    "Are you sure you want to $($operation -replace '^[^_]*_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selection.Name)?"
                 })
                 ## make it modal to the main window
                 $answer = [Windows.MessageBox]::Show( $mainWindow , $prompt , 'Confirm Power Operation' , $buttons ,'Question' )
@@ -2547,34 +3637,119 @@ Function Process-Action
                 $answer = $null
                 break
             }
+            ## for a single VM selection, 'No' means skip; for multiple VMs, 'No' means do this one and re-prompt for the next
+            if( $answer -ieq 'No' -and $selectedVMs.Count -le 1 )
+            {
+                break
+            }
             ## else if $answer = no then we are just performing on this VM and will prompt again next time round this loop           
             if( $operation -ieq 'NameToClipboard' )
             {
                 $selection.Name | Set-Clipboard @clipboardParameters
             }
+            elseif( $operation -ieq 'Azure_PowerOn' )
+            {
+                $actionStatus = $null
+                $actionStatus = Start-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait
+            }
+            elseif( $operation -ieq 'Azure_Shutdown' )
+            {
+                $actionStatus = $null
+                $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Force
+            }
+            elseif( $operation -ieq 'Azure_Poweroff' )
+            {
+                $actionStatus = $null
+                $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Force -SkipShutdown -Force
+            }
+            elseif( $operation -imatch '^Azure_.*Session$' )
+            {
+                try
+                {
+                    $sessionHost = $null
+                    $sessionHost = Get-AzureAVDSessionHost -selection $selection
+
+                    if( $operation -ieq 'Azure_DrainModeOnSession' -or $operation -ieq 'Azure_DrainModeOffSession' )
+                    {
+                        [bool]$allowNewSession = $operation -ieq 'Azure_DrainModeOffSession'
+                        [string]$payload = (@{ properties = @{ allowNewSession = $allowNewSession } } | ConvertTo-Json -Compress)
+                        $null = Invoke-AzRestMethod -Method PATCH -Path "$($sessionHost.Id)?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
+                        $refreshAzureList = $true
+                        continue
+                    }
+
+                    [array]$userSessions = @( Get-AzureAVDUserSessions -sessionHostResourceId $sessionHost.Id )
+                    if( $null -eq $userSessions -or $userSessions.Count -eq 0 )
+                    {
+                        [void][Windows.MessageBox]::Show( $mainWindow , "No active user sessions found on $($selection.Name)" , 'Azure AVD Sessions' , 'Ok' ,'Information' )
+                        continue
+                    }
+
+                    if( $operation -ieq 'Azure_MessageSession' )
+                    {
+                        if( $null -eq $azureSessionMessage )
+                        {
+                            $azureSessionMessage = Get-AzureAVDSessionMessage
+                            if( $null -eq $azureSessionMessage )
+                            {
+                                break
+                            }
+                        }
+                    }
+
+                    ForEach( $userSession in $userSessions )
+                    {
+                        if( $operation -ieq 'Azure_DisconnectSession' )
+                        {
+                            $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/disconnect?api-version=$AVDAPIversion" -ErrorAction Stop
+                            $refreshAzureList = $true
+                        }
+                        elseif( $operation -ieq 'Azure_LogoffSession' )
+                        {
+                            $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion" -ErrorAction Stop
+                            $refreshAzureList = $true
+                        }
+                        elseif( $operation -ieq 'Azure_ForceLogoffSession' )
+                        {
+                            $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion&force=true" -ErrorAction Stop
+                            $refreshAzureList = $true
+                        }
+                        elseif( $operation -ieq 'Azure_MessageSession' )
+                        {
+                            [string]$payload = (@{ messageTitle = $azureSessionMessage.Title ; messageBody = $azureSessionMessage.Body } | ConvertTo-Json -Compress)
+                            $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/sendMessage?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
+                        }
+                    }
+                }
+                catch
+                {
+                    Write-Warning -Message "Azure AVD session operation failed for $($selection.Name) : $_"
+                    [void][Windows.MessageBox]::Show( $mainWindow , "Azure AVD session operation failed for $($selection.Name)`n$($_.Exception.Message)" , 'Azure AVD Sessions' , 'Ok' ,'Error' )
+                }
+            }
             elseif( $operation -ieq 'HyperV_PowerOn' )
             {
-                Hyper-V\Start-VM -VMName $selection.Name -Passthru @hypervParameters
+                Hyper-V\Start-VM -VMName $selection.Name @hypervParameters @async
             }
             elseif( $operation -ieq 'HyperV_Shutdown' )
             {
-                Hyper-V\Stop-VM -VMName $selection.Name -Passthru @hypervParameters
+                Hyper-V\Stop-VM -VMName $selection.Name  @hypervParameters @async
             }
             elseif( $operation -ieq 'HyperV_PowerOff' )
             {
-                Hyper-V\Stop-VM -VMName $selection.Name -Passthru -TurnOff @hypervParameters -Force -Confirm:$false
+                Hyper-V\Stop-VM -VMName $selection.Name -TurnOff @hypervParameters -Force -Confirm:$false @async
             }
             elseif( $operation -ieq 'HyperV_Restart' )
             {
-                Hyper-V\Restart-VM -VMName $selection.Name -Passthru @hypervParameters -Force -Confirm:$false
+                Hyper-V\Restart-VM -VMName $selection.Name  @hypervParameters -Force -Confirm:$false @async
             }
             elseif( $operation -ieq 'HyperV_Resume' )
             {
-                Hyper-V\Resume-VM -VMName $selection.Name -Passthru @hypervParameters
+                Hyper-V\Resume-VM -VMName $selection.Name  @hypervParameters -Asjob @async
             }
             elseif( $operation -ieq 'HyperV_Suspend' )
             {
-                Hyper-V\Suspend-VM -VMName $selection.Name -Passthru @hypervParameters
+                Hyper-V\Suspend-VM -VMName $selection.Name @hypervParameters @async
             }
             elseif( $operation -ieq 'HyperV_RevertLatestSnapshot' -or $operation -ieq 'HyperV_DeleteLatestSnapshot')
             {
@@ -2621,7 +3796,7 @@ Function Process-Action
                         }
                         elseif( $response -ieq 'yes' )
                         {
-                            Hyper-V\Stop-VM -VM $VM -TurnOff ## syncrhonous
+                            Hyper-V\Stop-VM -VM $VM -TurnOff ## synchronous
                         }
                     }
                     if( $textInputWindow.ShowDialog() )
@@ -2637,7 +3812,7 @@ Function Process-Action
                         $response = [Windows.MessageBox]::Show( $mainWindow , "Snapshot $(if( $checkpointStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name) after restore" , 'YesNo' ,'Question' )
                         if( $response -ieq 'yes' )
                         {
-                            Hyper-V\Start-VM -VM $VM -AsJob
+                            Hyper-V\Start-VM -VMName $selection.Name @hypervParameters @async
                         }
                     }
                 }
@@ -2683,7 +3858,7 @@ Function Process-Action
             }
             elseif( $operation -ieq 'HyperV_Save' )
             {
-                Hyper-V\Save-VM -VMName $selection.Name -Passthru @hypervParameters
+                Hyper-V\Save-VM -VMName $selection.Name @hypervParameters @async
             }
             elseif( $operation -ieq 'HyperV_Delete' -or $operation -ieq 'HyperV_DeleteIncludingDisks' )
             {
@@ -2767,6 +3942,7 @@ Function Process-Action
                         @{ Setting = "Hard Drives"; Value = $diskDetails -join "`n" }
                         @{ Setting = "NICs"; Value = $NICs.Count }                        
                         @{ Setting = "IP Addresses"; Value = ( $NICs | Select-Object -ExpandProperty IPAddresses -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
+                        @{ Setting = "DNS Resolved"; Value = ( Resolve-DnsName -Name $details.Name -Type A | Select-Object -ExpandProperty IPAddress -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
                         @{ Setting = "Snapshots"; Value = $snapshots.Count }
                         @{ Setting = "Created"; Value = $details.CreationTime.ToString('G') }
                         @{ Setting = "Oldest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[0].CreationTime.ToString('G')) ($($snapshots[0].Name) ($($snapshots[0].Notes)))" })}
@@ -2787,7 +3963,6 @@ Function Process-Action
                     $form.Controls.Add($listView)
                     $form.Add_Shown({ $form.Activate() })
                     [void]$form.ShowDialog()
-
                 }
                 else
                 {
@@ -2796,7 +3971,7 @@ Function Process-Action
             }
             elseif( $Operation -ieq 'HyperV_EnableNestedVirtualisation' )
             {
-                if( $vm -and $vm.State -ieq 'Running' )
+                if( ( $vm = Hyper-V\Get-VM -VMName $selection.Name @hypervParameters) -and $vm.State -ieq 'Running' )
                 {
                     $response = [Windows.MessageBox]::Show( $mainWindow , "VM cannot be running`nUptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
                     if( $response -ieq 'Cancel' )
@@ -2813,7 +3988,7 @@ Function Process-Action
                 $response = [Windows.MessageBox]::Show( $mainWindow , "Change $(if( $configChangeStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name)" , 'YesNo' ,'Question' )
                 if( $response -ieq 'yes' )
                 {
-                    Hyper-V\Start-VM -VM $VM -AsJob
+                    Hyper-V\Start-VM -VM $VM @hypervParameters @async
                 }
             }
             elseif( $operation -ieq 'HyperV_EnableResourceMetering' )
@@ -2827,7 +4002,7 @@ Function Process-Action
             elseif( $operation -ieq 'HyperV_DisConnectNIC' )
             {
                 ## TODO what if more than one NIC?
-                Hyper-V\Disconnect-VMNetworkAdapter -VMName $selection.Name @hypervParameters
+                Hyper-V\Disconnect-VMNetworkAdapter -VMName $selection.Name @hypervParameters -Passthru
             }
             elseif( $operation -imatch 'HyperV_ConnectNIC*' )
             {
@@ -2838,7 +4013,7 @@ Function Process-Action
                 {
                     Write-Warning "VM $($selecion.Name) has $($switches.Count) NICs which isn't yet implemented sorry"
                 }
-                Hyper-V\Connect-VMNetworkAdapter -VMName $selection.Name -SwitchName $switches[ 0 ].Name @hypervParameters
+                Hyper-V\Connect-VMNetworkAdapter -VMName $selection.Name -SwitchName $switches[ 0 ].Name @hypervParameters @async
             }
             elseif( $operation -ieq 'HyperV_RunOn' )
             {
@@ -2889,6 +4064,10 @@ Function Process-Action
         if( $null -ne $jobs -and $jobs.count -gt 0 )
         {
             $jobs | Write-Verbose
+        }
+        if( $refreshAzureList -and $GUIobject -eq $WPFlistViewAzureVMs )
+        {
+            Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
         }
     }
     else
@@ -3333,10 +4512,32 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Add-HyperVVMsToListView -filter $WPFtextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -hyperVhost $WPFtextBoxHyperVHost.Text -all $WPFcheckBoxHyperVAllVMs.IsChecked
         })
         #>
-        $WPFlistViewVMwareVMs.add_MouseDoubleClick({
+        $WPFlistViewVMwareVMs.add_PreviewMouseDoubleClick({
+            param($sender, $eventArgs)
             Write-Verbose "Launch on VMware list item double clicked"
-            Start-RemoteSessionFromHypervisor -hypervisorType VMware
-            $_.Handled = $true
+            
+            # Get the item under the mouse cursor
+            $position = $eventArgs.GetPosition($sender)
+            $hitTestResult = [System.Windows.Media.VisualTreeHelper]::HitTest($sender, $position)
+            
+            if ($hitTestResult) {
+                # Walk up the visual tree to find the ListViewItem
+                $element = $hitTestResult.VisualHit
+                while ($element -and $element -isnot [System.Windows.Controls.ListViewItem]) {
+                    $element = [System.Windows.Media.VisualTreeHelper]::GetParent($element)
+                }
+                
+                if ($element -and $element.DataContext) {
+                    # Select the double-clicked item
+                    $sender.SelectedItems.Clear()
+                    $sender.SelectedItems.Add($element.DataContext)
+                    $sender.SelectedItem = $element.DataContext
+                    
+                    Write-Verbose "Selected item for launch: $($element.DataContext.Name)"
+                    Start-RemoteSessionFromHypervisor -hypervisorType VMware
+                }
+            }
+            $eventArgs.Handled = $true
         })
         
         $WPFlistViewHyperVVMs.Add_PreviewMouseLeftButtonDown({
@@ -3408,10 +4609,32 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             Write-Verbose -Message "$([datetime]::Now.ToString('G')) left mouse up, duration $($leftButtonClickedDuration.TotalMilliseconds)"
         })
 
-        $WPFlistViewHyperVVMs.add_MouseDoubleClick({
-            $_.Handled = $true
+        $WPFlistViewHyperVVMs.add_PreviewMouseDoubleClick({
+            param($sender, $eventArgs)
             Write-Verbose "Launch on Hyper-V list item double clicked"
-            Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V
+            
+            # Get the item under the mouse cursor
+            $position = $eventArgs.GetPosition($sender)
+            $hitTestResult = [System.Windows.Media.VisualTreeHelper]::HitTest($sender, $position)
+            
+            if ($hitTestResult) {
+                # Walk up the visual tree to find the ListViewItem
+                $element = $hitTestResult.VisualHit
+                while ($element -and $element -isnot [System.Windows.Controls.ListViewItem]) {
+                    $element = [System.Windows.Media.VisualTreeHelper]::GetParent($element)
+                }
+                
+                if ($element -and $element.DataContext) {
+                    # Select the double-clicked item
+                    $sender.SelectedItems.Clear()
+                    $sender.SelectedItems.Add($element.DataContext)
+                    $sender.SelectedItem = $element.DataContext
+                    
+                    Write-Verbose "Selected item for launch: $($element.DataContext.Name)"
+                    Start-RemoteSessionFromHypervisor -hypervisorType Hyper-V
+                }
+            }
+            $eventArgs.Handled = $true
         })
 
         $WPFbuttonVMwareConnect.Add_Click({
@@ -3479,6 +4702,65 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             }
         })
 
+        $WPFbuttonAzureApplyFilter.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Azure Apply Filter clicked"
+            $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
+            Add-AzureVMsToListView -filter $wpfTextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+            $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty) 
+        })
+
+        $WPFlistViewAzureVMs.AddHandler( [System.Windows.Controls.GridViewColumnHeader]::ClickEvent , [System.Windows.RoutedEventHandler]{
+            param( $sourceControl , $routedEventArgs )
+
+            Sort-Columns -control $sourceControl -eventArgs $routedEventArgs
+        })
+
+        $WPFlistViewAzureVMs.AddHandler( [System.Windows.Controls.GridViewColumnHeader]::MouseRightButtonUpEvent , [System.Windows.Input.MouseButtonEventHandler]{
+            param( $sourceControl , $mouseEventArgs )
+
+            $columnHeader = Get-GridViewColumnHeader -eventArgs $mouseEventArgs
+            if( $null -ne $columnHeader )
+            {
+                Set-AzureColumnFilter -columnHeader $columnHeader
+                $mouseEventArgs.Handled = $true
+            }
+        })
+
+        $WPFcheckBoxAzureAVD.Add_Checked({
+            Set-AzureHostPoolColumn -showHostPool $true
+            Set-AzureSessionMenuState -avdEnabled $true
+        })
+
+        $WPFcheckBoxAzureAVD.Add_Unchecked({
+            Set-AzureHostPoolColumn -showHostPool $false
+            Set-AzureSessionMenuState -avdEnabled $false
+        })
+
+        Set-AzureSessionMenuState -avdEnabled ([bool]$WPFcheckBoxAzureAVD.IsChecked)
+        
+        $WPFbuttonAzureConnect.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Azure Connect clicked"
+            $connection = $null
+            $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
+            Import-Module -Name Az.Accounts -Verbose:$false
+            $connection = Connect-AzAccount
+            if( $null -ne $connection )
+            {
+                Select-AzureSubscription
+            }
+            $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty) 
+        })
+
+        $WPFbuttonAzureSubscription.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Azure Subscription clicked"
+            $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
+            Select-AzureSubscription
+            $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty)
+        })
+        
         $WPFbuttonVMwareApplyFilter.Add_Click({
             $_.Handled = $true
             Write-Verbose "VMware Apply Filter clicked"
@@ -3495,9 +4777,34 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             $_.Handled = $true
             Write-Verbose "Hyper-V Clear Filter clicked"
             $WPFtextBoxHyperVFilter.Text = ''
+            $WPFcheckBoxHyperVAllVMs.IsChecked = $false
             Add-HyperVVMsToListView -filter $WPFtextBoxHyperVFilter.Text -regex $WPFcheckBoxHyperVRegEx.IsChecked -hyperVhost $WPFtextBoxHyperVHost.Text -all $WPFcheckBoxHyperVAllVMs.IsChecked
         })
 
+        $WPFbuttonAzureClearFilter.Add_Click({
+            $_.Handled = $true
+            Write-Verbose "Azure Clear Filter clicked"
+            $WPFtextBoxAzureFilter.Text = ''
+            $WPFcheckBoxAzureAllVMs.IsChecked = $false
+            $script:azureColumnFilters.Clear()
+            ##$WPFcheckBoxAzureAVD.IsChecked = $false
+            Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked
+        })
+        $WPFcheckBoxAzureAVD.IsChecked = $avd
+
+        $WPFAzurePowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_PowerOn' })
+        $WPFAzurePowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_PowerOff' })
+        $WPFAzureShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_ShutDown' })
+        $WPFAzureRestartContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_Restart' })
+        $WPFAzureDetailSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DetailSession' })
+        $WPFAzureMessageSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_MessageSession' })
+        $WPFAzureDisconnectSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DisconnectSession' })
+        $WPFAzureLogoffSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_LogoffSession' })
+        $WPFAzureForceLogoffSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_ForceLogoffSession' })
+        $WPFAzureDrainModeOnSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DrainModeOnSession' })
+        $WPFAzureDrainModeOffSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DrainModeOffSession' })
+        $WPFAzureNameToClipboard.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'NameToClipboard' })
+        
         $WPFdatagridDisplays.add_MouseDoubleClick({
             $_.Handled = $true
             Write-Verbose "Grid item double clicked"
@@ -3682,81 +4989,200 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
 New-RemoteSession -rethrow
 
 # SIG # Begin signature block
-# MIIOVAYJKoZIhvcNAQcCoIIORTCCDkECAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDG0/i4LzWxgOd9
-# v5hv/Mrlo/GjQsV2+pVB1InSEeAqP6CCDCYwggV9MIIDZaADAgECAhAB1rN1Nl8g
-# zZEd1y/l+ZNkMA0GCSqGSIb3DQEBCwUAMFoxCzAJBgNVBAYTAkxWMRkwFwYDVQQK
-# ExBFblZlcnMgR3JvdXAgU0lBMTAwLgYDVQQDEydHb0dldFNTTCBHNCBDUyBSU0E0
-# MDk2IFNIQTI1NiAyMDIyIENBLTEwHhcNMjUwNzIxMDAwMDAwWhcNMjYwNzIwMjM1
-# OTU5WjBxMQswCQYDVQQGEwJHQjESMBAGA1UEBxMJV2FrZWZpZWxkMSYwJAYDVQQK
-# Ex1TZWN1cmUgUGxhdGZvcm0gU29sdXRpb25zIEx0ZDEmMCQGA1UEAxMdU2VjdXJl
-# IFBsYXRmb3JtIFNvbHV0aW9ucyBMdGQwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAARE
-# VushBxmaLDZJys/h4fGHMe+gEacCcTcalje+NTkKlUboku0+BdNDPxotbsh0aHHv
-# HhwndrrL7f/pD45f5VUVKK5F3rQY7bZjZ6gxwGa/BzuFZsRhO12MTMC7zawyaQCj
-# ggHUMIIB0DAfBgNVHSMEGDAWgBTJ/BDvUMjLa3+9CETvOmKT7VtemjAdBgNVHQ4E
-# FgQU+7W5w1B8mWyXaJebkcnMJkcSB+cwPgYDVR0gBDcwNTAzBgZngQwBBAEwKTAn
-# BggrBgEFBQcCARYbaHR0cDovL3d3dy5kaWdpY2VydC5jb20vQ1BTMA4GA1UdDwEB
-# /wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzCBlwYDVR0fBIGPMIGMMESgQqBA
-# hj5odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vR29HZXRTU0xHNENTUlNBNDA5NlNI
-# QTI1NjIwMjJDQS0xLmNybDBEoEKgQIY+aHR0cDovL2NybDQuZGlnaWNlcnQuY29t
-# L0dvR2V0U1NMRzRDU1JTQTQwOTZTSEEyNTYyMDIyQ0EtMS5jcmwwgYMGCCsGAQUF
-# BwEBBHcwdTAkBggrBgEFBQcwAYYYaHR0cDovL29jc3AuZGlnaWNlcnQuY29tME0G
-# CCsGAQUFBzAChkFodHRwOi8vY2FjZXJ0cy5kaWdpY2VydC5jb20vR29HZXRTU0xH
-# NENTUlNBNDA5NlNIQTI1NjIwMjJDQS0xLmNydDAJBgNVHRMEAjAAMA0GCSqGSIb3
-# DQEBCwUAA4ICAQALHZsdOuMeT/e1fsdQfhIz/2wS19UWlG1lxXieYOmPAju0DA5I
-# ZheTgMtWMkUm96gWNtixny+q5nX8ckzuuD47esI2bM4G9RcVVKN0vdLZHv6QXZE5
-# Ht2qTX8E1bqfejtDcGY0aqOjVYeOi/o98BsR98ItkjWNP3xE2oKEx6xYyZBL6d/z
-# HB2ySd7hdk4VfmH9rTRftAsAn5L9s6m2ILRK8QRrkUJY9RxXswvQy2gNzccg+eYw
-# y5gvLnzp4kdsTleV8SyZZQ2Tcp+HHPGxekB1NIM55vlCb9ocYw5j7noae3/PF+u/
-# Zt/E+copm1c+MDju2bz1EelqXxuVsICRV9ikpJ7QEU+LwUiT7Ne+mgBmQ3IIyb8d
-# QwR0xu1E/sKoWZjPRha6JLe65RaoBnXOX6fWQglPx467qjTUQpLxKGKMdQjS+LGJ
-# uI2/BMWBHJfdhz/3GR9XVaDOWLhk+ChkjoXBgF2uFEXSiv4LNgigQ1R9RiojukEz
-# mSRe5LK0UPdJch5I/HXg1lJFPORx05Ila0uSMusisgrPNvl5fEuf+DGYl2ywHsZQ
-# pkeKT5wHQ5QJEocTKwGPfiGe9drO5DoMos5AXL5xnrPh/aQB4XKrttZTFy0+YXrU
-# WSYa9v2rp7cAwuDsmd9gLoQzfW7jagbHfxvmLQ0CJTO9Y4BsJZML4bjimDCCBqEw
-# ggSJoAMCAQICEAeEPa0BwRXCdO5BpygiRnkwDQYJKoZIhvcNAQELBQAwYjELMAkG
-# A1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRp
-# Z2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290IEc0MB4X
-# DTIyMDYyMzAwMDAwMFoXDTMyMDYyMjIzNTk1OVowWjELMAkGA1UEBhMCTFYxGTAX
-# BgNVBAoTEEVuVmVycyBHcm91cCBTSUExMDAuBgNVBAMTJ0dvR2V0U1NMIEc0IENT
-# IFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0EtMTCCAiIwDQYJKoZIhvcNAQEBBQADggIP
-# ADCCAgoCggIBAK0e9AeyQ2aKomd3JZUKpfgW1inkV8ks71KHQG7Be68F41i3bXF/
-# yH+ksn/tjN4pw2r3PjMSF5yq0PTGFu9IHySwEB9YExk7Q0t85PSPtbI24Puu/5kX
-# Nr6bEhDv2zV0KLBQzAaidqgMruapl8OkoQTFHpTIoGHdpq1PvdTYibH/H59hOZAW
-# r43wWsuzoWHpgQZYlOCzHLDV8AKEJ+C0RxmR21yAruq6qyQe1bo8n2XlU0ntPdZe
-# nOew47GvPerHQLNaPArz7cq/ZfqmJa93xhF8A7JxKtPj88zRwcsVznGz/ib96TgU
-# KdhJ6bjd2gV+0HFkFCQcqg9bcG3pUiuFUjC87uGtSOFyEkllh1KV3dsA0O+Inn9O
-# g/sQ2/3tT0y0oW+YLl3N3WngfEVHSnnBaZhBtb7LdEWbSenof2bnsxQw2nTKyZ0m
-# NvR/v51Utfc4QFRvof6vUtEtlP/EQ5O7A7EaDZLjDbkoYv1IIFRbieQGWM8d4lOh
-# T5Me3Q/xlB/gH0gWUbG0srSDe44CfBIWAq2Y2OGROXxxosBDBuAQg0KquFzRvqTZ
-# nz5DCBUAvSci7Mz1yQo/zG0hxaDzkvf+XRxOQdB176MoYMbYJ3EEe1+UshS3CoPs
-# kDa4LFaUjNE2DBPSQfZ6fT5BXwrOJIZqo7avTqTBuirb/HLh73wIR9JjAgMBAAGj
-# ggFZMIIBVTASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBTJ/BDvUMjLa3+9
-# CETvOmKT7VtemjAfBgNVHSMEGDAWgBTs1+OC0nFdZEzfLmc/57qYrhwPTzAOBgNV
-# HQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwMwdwYIKwYBBQUHAQEEazBp
-# MCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQQYIKwYBBQUH
-# MAKGNWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRS
-# b290RzQuY3J0MEMGA1UdHwQ8MDowOKA2oDSGMmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0
-# LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3JsMBwGA1UdIAQVMBMwBwYFZ4EM
-# AQMwCAYGZ4EMAQQBMA0GCSqGSIb3DQEBCwUAA4ICAQAL2wrXsh2YpMJRq0Szv7J7
-# CEmcni3KsvA0Sd+Xoesbw+bsdnRv7klz4YaolPyRFzuaKG5Wt2xg0d2Jy54Mv2Ka
-# G0K6wj+tSaPCG1+Wn5eAuSaAsauawSGjVv6UaJGnssL/XR2LxIA6KUOQePlnHXjb
-# FG8GutaP1451IYfBi5sCwR3oIOiPBxpXP2l9czNg7eRzQ7o9eDVORyCRiUJQC4Me
-# 6T+xnHrxbQVWPU/aIyH5VSr2UvWm6ugDJ2h5ZVSH/5wxd6p+CkGqUBb6vyZrkXrI
-# ovSy1VAfy9hvURLSYlIg/Ih+QiMLVXSltlLenRBawppp8Sivx8t8s19LGe1Uj+6C
-# 63T7p6SW49ZGkRcf4kCI11GNsttlyEJER7f9eXRiXCQD55BUl8zQDteK4W1j+Y6k
-# rYA34Tbm3mZBgWGl3FlfktMMpaAOdv4DpCcS3iI3K6Rwtom5Lwg+A/PQTYAtku3d
-# Gqz6VeJ8r8bCc0hZA1t/sWYsMH2mHyLx2+xHWGyNzYo8RbhsCxu8tzPyE3XMTX9B
-# s5X3a8MagWPBk6LaShD5TISHR7yMMUcAol5Mj6nwQ8T+aq+iMsUCe3fXJcgDa2O3
-# QRG2yOSEE2ZljpIQ5+cig7C/Kpq8s/JrVS3f/Zw4Uu41DxCXodpmw1ASuefOf5kQ
-# BpROQ9lp5XKgciQ4MQIvOTGCAYQwggGAAgEBMG4wWjELMAkGA1UEBhMCTFYxGTAX
-# BgNVBAoTEEVuVmVycyBHcm91cCBTSUExMDAuBgNVBAMTJ0dvR2V0U1NMIEc0IENT
-# IFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0EtMQIQAdazdTZfIM2RHdcv5fmTZDANBglg
-# hkgBZQMEAgEFAKCBhDAYBgorBgEEAYI3AgEMMQowCKACgAChAoAAMBkGCSqGSIb3
-# DQEJAzEMBgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEV
-# MC8GCSqGSIb3DQEJBDEiBCAyj8zH2yOHHu5yZk70+fBdoO0J9Dffn9bwVH4znMNX
-# HTALBgcqhkjOPQIBBQAEaDBmAjEAzLUdo0HT8EHghSzlCFM69hDj34f7LkcN2otW
-# hkccb8/d59TjIaExP/FFVCPgI7+FAjEAr+QKxn3vkJzqs6eQkRgRUCYbVo9EX/kl
-# cPPzLhXM0dOsheUH7RLHaAdUc9Cp6Wje
+# MIIkkQYJKoZIhvcNAQcCoIIkgjCCJH4CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
+# gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUYEuunALWmM1oEmZ1mcUNnbVN
+# tbCggh9gMIIFfTCCA2WgAwIBAgIQAdazdTZfIM2RHdcv5fmTZDANBgkqhkiG9w0B
+# AQsFADBaMQswCQYDVQQGEwJMVjEZMBcGA1UEChMQRW5WZXJzIEdyb3VwIFNJQTEw
+# MC4GA1UEAxMnR29HZXRTU0wgRzQgQ1MgUlNBNDA5NiBTSEEyNTYgMjAyMiBDQS0x
+# MB4XDTI1MDcyMTAwMDAwMFoXDTI2MDcyMDIzNTk1OVowcTELMAkGA1UEBhMCR0Ix
+# EjAQBgNVBAcTCVdha2VmaWVsZDEmMCQGA1UEChMdU2VjdXJlIFBsYXRmb3JtIFNv
+# bHV0aW9ucyBMdGQxJjAkBgNVBAMTHVNlY3VyZSBQbGF0Zm9ybSBTb2x1dGlvbnMg
+# THRkMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAERFbrIQcZmiw2ScrP4eHxhzHvoBGn
+# AnE3GpY3vjU5CpVG6JLtPgXTQz8aLW7IdGhx7x4cJ3a6y+3/6Q+OX+VVFSiuRd60
+# GO22Y2eoMcBmvwc7hWbEYTtdjEzAu82sMmkAo4IB1DCCAdAwHwYDVR0jBBgwFoAU
+# yfwQ71DIy2t/vQhE7zpik+1bXpowHQYDVR0OBBYEFPu1ucNQfJlsl2iXm5HJzCZH
+# EgfnMD4GA1UdIAQ3MDUwMwYGZ4EMAQQBMCkwJwYIKwYBBQUHAgEWG2h0dHA6Ly93
+# d3cuZGlnaWNlcnQuY29tL0NQUzAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYI
+# KwYBBQUHAwMwgZcGA1UdHwSBjzCBjDBEoEKgQIY+aHR0cDovL2NybDMuZGlnaWNl
+# cnQuY29tL0dvR2V0U1NMRzRDU1JTQTQwOTZTSEEyNTYyMDIyQ0EtMS5jcmwwRKBC
+# oECGPmh0dHA6Ly9jcmw0LmRpZ2ljZXJ0LmNvbS9Hb0dldFNTTEc0Q1NSU0E0MDk2
+# U0hBMjU2MjAyMkNBLTEuY3JsMIGDBggrBgEFBQcBAQR3MHUwJAYIKwYBBQUHMAGG
+# GGh0dHA6Ly9vY3NwLmRpZ2ljZXJ0LmNvbTBNBggrBgEFBQcwAoZBaHR0cDovL2Nh
+# Y2VydHMuZGlnaWNlcnQuY29tL0dvR2V0U1NMRzRDU1JTQTQwOTZTSEEyNTYyMDIy
+# Q0EtMS5jcnQwCQYDVR0TBAIwADANBgkqhkiG9w0BAQsFAAOCAgEACx2bHTrjHk/3
+# tX7HUH4SM/9sEtfVFpRtZcV4nmDpjwI7tAwOSGYXk4DLVjJFJveoFjbYsZ8vquZ1
+# /HJM7rg+O3rCNmzOBvUXFVSjdL3S2R7+kF2ROR7dqk1/BNW6n3o7Q3BmNGqjo1WH
+# jov6PfAbEffCLZI1jT98RNqChMesWMmQS+nf8xwdskne4XZOFX5h/a00X7QLAJ+S
+# /bOptiC0SvEEa5FCWPUcV7ML0MtoDc3HIPnmMMuYLy586eJHbE5XlfEsmWUNk3Kf
+# hxzxsXpAdTSDOeb5Qm/aHGMOY+56Gnt/zxfrv2bfxPnKKZtXPjA47tm89RHpal8b
+# lbCAkVfYpKSe0BFPi8FIk+zXvpoAZkNyCMm/HUMEdMbtRP7CqFmYz0YWuiS3uuUW
+# qAZ1zl+n1kIJT8eOu6o01EKS8ShijHUI0vixibiNvwTFgRyX3Yc/9xkfV1Wgzli4
+# ZPgoZI6FwYBdrhRF0or+CzYIoENUfUYqI7pBM5kkXuSytFD3SXIeSPx14NZSRTzk
+# cdOSJWtLkjLrIrIKzzb5eXxLn/gxmJdssB7GUKZHik+cB0OUCRKHEysBj34hnvXa
+# zuQ6DKLOQFy+cZ6z4f2kAeFyq7bWUxctPmF61FkmGvb9q6e3AMLg7JnfYC6EM31u
+# 42oGx38b5i0NAiUzvWOAbCWTC+G44pgwggWNMIIEdaADAgECAhAOmxiO+dAt5+/b
+# UOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxE
+# aWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNVBAMT
+# G0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBaFw0z
+# MTExMDkyMzU5NTlaMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJ
+# bmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0
+# IFRydXN0ZWQgUm9vdCBHNDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIB
+# AL/mkHNo3rvkXUo8MCIwaTPswqclLskhPfKK2FnC4SmnPVirdprNrnsbhA3EMB/z
+# G6Q4FutWxpdtHauyefLKEdLkX9YFPFIPUh/GnhWlfr6fqVcWWVVyr2iTcMKyunWZ
+# anMylNEQRBAu34LzB4TmdDttceItDBvuINXJIB1jKS3O7F5OyJP4IWGbNOsFxl7s
+# Wxq868nPzaw0QF+xembud8hIqGZXV59UWI4MK7dPpzDZVu7Ke13jrclPXuU15zHL
+# 2pNe3I6PgNq2kZhAkHnDeMe2scS1ahg4AxCN2NQ3pC4FfYj1gj4QkXCrVYJBMtfb
+# BHMqbpEBfCFM1LyuGwN1XXhm2ToxRJozQL8I11pJpMLmqaBn3aQnvKFPObURWBf3
+# JFxGj2T3wWmIdph2PVldQnaHiZdpekjw4KISG2aadMreSx7nDmOu5tTvkpI6nj3c
+# AORFJYm2mkQZK37AlLTSYW3rM9nF30sEAMx9HJXDj/chsrIRt7t/8tWMcCxBYKqx
+# YxhElRp2Yn72gLD76GSmM9GJB+G9t+ZDpBi4pncB4Q+UDCEdslQpJYls5Q5SUUd0
+# viastkF13nqsX40/ybzTQRESW+UQUOsxxcpyFiIJ33xMdT9j7CFfxCBRa2+xq4aL
+# T8LWRV+dIPyhHsXAj6KxfgommfXkaS+YHS312amyHeUbAgMBAAGjggE6MIIBNjAP
+# BgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTs1+OC0nFdZEzfLmc/57qYrhwPTzAf
+# BgNVHSMEGDAWgBRF66Kv9JLLgjEtUYunpyGd823IDzAOBgNVHQ8BAf8EBAMCAYYw
+# eQYIKwYBBQUHAQEEbTBrMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2Vy
+# dC5jb20wQwYIKwYBBQUHMAKGN2h0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9E
+# aWdpQ2VydEFzc3VyZWRJRFJvb3RDQS5jcnQwRQYDVR0fBD4wPDA6oDigNoY0aHR0
+# cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENBLmNy
+# bDARBgNVHSAECjAIMAYGBFUdIAAwDQYJKoZIhvcNAQEMBQADggEBAHCgv0NcVec4
+# X6CjdBs9thbX979XB72arKGHLOyFXqkauyL4hxppVCLtpIh3bb0aFPQTSnovLbc4
+# 7/T/gLn4offyct4kvFIDyE7QKt76LVbP+fT3rDB6mouyXtTP0UNEm0Mh65ZyoUi0
+# mcudT6cGAxN3J0TU53/oWajwvy8LpunyNDzs9wPHh6jSTEAZNUZqaVSwuKFWjuyk
+# 1T3osdz9HNj0d1pcVIxv76FQPfx2CWiEn2/K2yCNNWAcAgPLILCsWKAOQGPFmCLB
+# sln1VWvPJ6tsds5vIy30fnFqI2si/xK4VC0nftg62fC2h5b9W9FcrBjDTZ9ztwGp
+# n1eqXijiuZQwggahMIIEiaADAgECAhAHhD2tAcEVwnTuQacoIkZ5MA0GCSqGSIb3
+# DQEBCwUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAX
+# BgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRydXN0
+# ZWQgUm9vdCBHNDAeFw0yMjA2MjMwMDAwMDBaFw0zMjA2MjIyMzU5NTlaMFoxCzAJ
+# BgNVBAYTAkxWMRkwFwYDVQQKExBFblZlcnMgR3JvdXAgU0lBMTAwLgYDVQQDEydH
+# b0dldFNTTCBHNCBDUyBSU0E0MDk2IFNIQTI1NiAyMDIyIENBLTEwggIiMA0GCSqG
+# SIb3DQEBAQUAA4ICDwAwggIKAoICAQCtHvQHskNmiqJndyWVCqX4FtYp5FfJLO9S
+# h0BuwXuvBeNYt21xf8h/pLJ/7YzeKcNq9z4zEhecqtD0xhbvSB8ksBAfWBMZO0NL
+# fOT0j7WyNuD7rv+ZFza+mxIQ79s1dCiwUMwGonaoDK7mqZfDpKEExR6UyKBh3aat
+# T73U2Imx/x+fYTmQFq+N8FrLs6Fh6YEGWJTgsxyw1fAChCfgtEcZkdtcgK7quqsk
+# HtW6PJ9l5VNJ7T3WXpznsOOxrz3qx0CzWjwK8+3Kv2X6piWvd8YRfAOycSrT4/PM
+# 0cHLFc5xs/4m/ek4FCnYSem43doFftBxZBQkHKoPW3Bt6VIrhVIwvO7hrUjhchJJ
+# ZYdSld3bANDviJ5/ToP7ENv97U9MtKFvmC5dzd1p4HxFR0p5wWmYQbW+y3RFm0np
+# 6H9m57MUMNp0ysmdJjb0f7+dVLX3OEBUb6H+r1LRLZT/xEOTuwOxGg2S4w25KGL9
+# SCBUW4nkBljPHeJToU+THt0P8ZQf4B9IFlGxtLK0g3uOAnwSFgKtmNjhkTl8caLA
+# QwbgEINCqrhc0b6k2Z8+QwgVAL0nIuzM9ckKP8xtIcWg85L3/l0cTkHQde+jKGDG
+# 2CdxBHtflLIUtwqD7JA2uCxWlIzRNgwT0kH2en0+QV8KziSGaqO2r06kwboq2/xy
+# 4e98CEfSYwIDAQABo4IBWTCCAVUwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4E
+# FgQUyfwQ71DIy2t/vQhE7zpik+1bXpowHwYDVR0jBBgwFoAU7NfjgtJxXWRM3y5n
+# P+e6mK4cD08wDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUFBwMDMHcG
+# CCsGAQUFBwEBBGswaTAkBggrBgEFBQcwAYYYaHR0cDovL29jc3AuZGlnaWNlcnQu
+# Y29tMEEGCCsGAQUFBzAChjVodHRwOi8vY2FjZXJ0cy5kaWdpY2VydC5jb20vRGln
+# aUNlcnRUcnVzdGVkUm9vdEc0LmNydDBDBgNVHR8EPDA6MDigNqA0hjJodHRwOi8v
+# Y3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNybDAcBgNV
+# HSAEFTATMAcGBWeBDAEDMAgGBmeBDAEEATANBgkqhkiG9w0BAQsFAAOCAgEAC9sK
+# 17IdmKTCUatEs7+yewhJnJ4tyrLwNEnfl6HrG8Pm7HZ0b+5Jc+GGqJT8kRc7mihu
+# VrdsYNHdicueDL9imhtCusI/rUmjwhtflp+XgLkmgLGrmsEho1b+lGiRp7LC/10d
+# i8SAOilDkHj5Zx142xRvBrrWj9eOdSGHwYubAsEd6CDojwcaVz9pfXMzYO3kc0O6
+# PXg1TkcgkYlCUAuDHuk/sZx68W0FVj1P2iMh+VUq9lL1puroAydoeWVUh/+cMXeq
+# fgpBqlAW+r8ma5F6yKL0stVQH8vYb1ES0mJSIPyIfkIjC1V0pbZS3p0QWsKaafEo
+# r8fLfLNfSxntVI/ugut0+6ekluPWRpEXH+JAiNdRjbLbZchCREe3/Xl0YlwkA+eQ
+# VJfM0A7XiuFtY/mOpK2AN+E25t5mQYFhpdxZX5LTDKWgDnb+A6QnEt4iNyukcLaJ
+# uS8IPgPz0E2ALZLt3Rqs+lXifK/GwnNIWQNbf7FmLDB9ph8i8dvsR1hsjc2KPEW4
+# bAsbvLcz8hN1zE1/QbOV92vDGoFjwZOi2koQ+UyEh0e8jDFHAKJeTI+p8EPE/mqv
+# ojLFAnt31yXIA2tjt0ERtsjkhBNmZY6SEOfnIoOwvyqavLPya1Ut3/2cOFLuNQ8Q
+# l6HaZsNQErnnzn+ZEAaUTkPZaeVyoHIkODECLzkwgga0MIIEnKADAgECAhANx6xX
+# Bf8hmS5AQyIMOkmGMA0GCSqGSIb3DQEBCwUAMGIxCzAJBgNVBAYTAlVTMRUwEwYD
+# VQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAf
+# BgNVBAMTGERpZ2lDZXJ0IFRydXN0ZWQgUm9vdCBHNDAeFw0yNTA1MDcwMDAwMDBa
+# Fw0zODAxMTQyMzU5NTlaMGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2Vy
+# dCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBUaW1lU3RhbXBp
+# bmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTEwggIiMA0GCSqGSIb3DQEBAQUAA4IC
+# DwAwggIKAoICAQC0eDHTCphBcr48RsAcrHXbo0ZodLRRF51NrY0NlLWZloMsVO1D
+# ahGPNRcybEKq+RuwOnPhof6pvF4uGjwjqNjfEvUi6wuim5bap+0lgloM2zX4kftn
+# 5B1IpYzTqpyFQ/4Bt0mAxAHeHYNnQxqXmRinvuNgxVBdJkf77S2uPoCj7GH8BLux
+# BG5AvftBdsOECS1UkxBvMgEdgkFiDNYiOTx4OtiFcMSkqTtF2hfQz3zQSku2Ws3I
+# fDReb6e3mmdglTcaarps0wjUjsZvkgFkriK9tUKJm/s80FiocSk1VYLZlDwFt+cV
+# FBURJg6zMUjZa/zbCclF83bRVFLeGkuAhHiGPMvSGmhgaTzVyhYn4p0+8y9oHRaQ
+# T/aofEnS5xLrfxnGpTXiUOeSLsJygoLPp66bkDX1ZlAeSpQl92QOMeRxykvq6gby
+# lsXQskBBBnGy3tW/AMOMCZIVNSaz7BX8VtYGqLt9MmeOreGPRdtBx3yGOP+rx3rK
+# WDEJlIqLXvJWnY0v5ydPpOjL6s36czwzsucuoKs7Yk/ehb//Wx+5kMqIMRvUBDx6
+# z1ev+7psNOdgJMoiwOrUG2ZdSoQbU2rMkpLiQ6bGRinZbI4OLu9BMIFm1UUl9Vne
+# Ps6BaaeEWvjJSjNm2qA+sdFUeEY0qVjPKOWug/G6X5uAiynM7Bu2ayBjUwIDAQAB
+# o4IBXTCCAVkwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU729TSunkBnx6
+# yuKQVvYv1Ensy04wHwYDVR0jBBgwFoAU7NfjgtJxXWRM3y5nP+e6mK4cD08wDgYD
+# VR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUFBwMIMHcGCCsGAQUFBwEBBGsw
+# aTAkBggrBgEFBQcwAYYYaHR0cDovL29jc3AuZGlnaWNlcnQuY29tMEEGCCsGAQUF
+# BzAChjVodHRwOi8vY2FjZXJ0cy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVk
+# Um9vdEc0LmNydDBDBgNVHR8EPDA6MDigNqA0hjJodHRwOi8vY3JsMy5kaWdpY2Vy
+# dC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNybDAgBgNVHSAEGTAXMAgGBmeB
+# DAEEAjALBglghkgBhv1sBwEwDQYJKoZIhvcNAQELBQADggIBABfO+xaAHP4HPRF2
+# cTC9vgvItTSmf83Qh8WIGjB/T8ObXAZz8OjuhUxjaaFdleMM0lBryPTQM2qEJPe3
+# 6zwbSI/mS83afsl3YTj+IQhQE7jU/kXjjytJgnn0hvrV6hqWGd3rLAUt6vJy9lMD
+# PjTLxLgXf9r5nWMQwr8Myb9rEVKChHyfpzee5kH0F8HABBgr0UdqirZ7bowe9Vj2
+# AIMD8liyrukZ2iA/wdG2th9y1IsA0QF8dTXqvcnTmpfeQh35k5zOCPmSNq1UH410
+# ANVko43+Cdmu4y81hjajV/gxdEkMx1NKU4uHQcKfZxAvBAKqMVuqte69M9J6A47O
+# vgRaPs+2ykgcGV00TYr2Lr3ty9qIijanrUR3anzEwlvzZiiyfTPjLbnFRsjsYg39
+# OlV8cipDoq7+qNNjqFzeGxcytL5TTLL4ZaoBdqbhOhZ3ZRDUphPvSRmMThi0vw9v
+# ODRzW6AxnJll38F0cuJG7uEBYTptMSbhdhGQDpOXgpIUsWTjd6xpR6oaQf/DJbg3
+# s6KCLPAlZ66RzIg9sC+NJpud/v4+7RWsWCiKi9EOLLHfMR2ZyJ/+xhCx9yHbxtl5
+# TPau1j/1MIDpMPx0LckTetiSuEtQvLsNz3Qbp7wGWqbIiOWCnb5WqxL3/BAPvIXK
+# UjPSxyZsq8WhbaM2tszWkPZPubdcMIIG7TCCBNWgAwIBAgIQCoDvGEuN8QWC0cR2
+# p5V0aDANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGln
+# aUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0IFRydXN0ZWQgRzQgVGltZVN0
+# YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIwMjUgQ0ExMB4XDTI1MDYwNDAwMDAwMFoX
+# DTM2MDkwMzIzNTk1OVowYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
+# LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBTSEEyNTYgUlNBNDA5NiBUaW1lc3Rh
+# bXAgUmVzcG9uZGVyIDIwMjUgMTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoC
+# ggIBANBGrC0Sxp7Q6q5gVrMrV7pvUf+GcAoB38o3zBlCMGMyqJnfFNZx+wvA69HF
+# TBdwbHwBSOeLpvPnZ8ZN+vo8dE2/pPvOx/Vj8TchTySA2R4QKpVD7dvNZh6wW2R6
+# kSu9RJt/4QhguSssp3qome7MrxVyfQO9sMx6ZAWjFDYOzDi8SOhPUWlLnh00Cll8
+# pjrUcCV3K3E0zz09ldQ//nBZZREr4h/GI6Dxb2UoyrN0ijtUDVHRXdmncOOMA3Co
+# B/iUSROUINDT98oksouTMYFOnHoRh6+86Ltc5zjPKHW5KqCvpSduSwhwUmotuQhc
+# g9tw2YD3w6ySSSu+3qU8DD+nigNJFmt6LAHvH3KSuNLoZLc1Hf2JNMVL4Q1Opbyb
+# pMe46YceNA0LfNsnqcnpJeItK/DhKbPxTTuGoX7wJNdoRORVbPR1VVnDuSeHVZlc
+# 4seAO+6d2sC26/PQPdP51ho1zBp+xUIZkpSFA8vWdoUoHLWnqWU3dCCyFG1roSrg
+# HjSHlq8xymLnjCbSLZ49kPmk8iyyizNDIXj//cOgrY7rlRyTlaCCfw7aSUROwnu7
+# zER6EaJ+AliL7ojTdS5PWPsWeupWs7NpChUk555K096V1hE0yZIXe+giAwW00aHz
+# rDchIc2bQhpp0IoKRR7YufAkprxMiXAJQ1XCmnCfgPf8+3mnAgMBAAGjggGVMIIB
+# kTAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBTkO/zyMe39/dfzkXFjGVBDz2GM6DAf
+# BgNVHSMEGDAWgBTvb1NK6eQGfHrK4pBW9i/USezLTjAOBgNVHQ8BAf8EBAMCB4Aw
+# FgYDVR0lAQH/BAwwCgYIKwYBBQUHAwgwgZUGCCsGAQUFBwEBBIGIMIGFMCQGCCsG
+# AQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wXQYIKwYBBQUHMAKGUWh0
+# dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRHNFRpbWVT
+# dGFtcGluZ1JTQTQwOTZTSEEyNTYyMDI1Q0ExLmNydDBfBgNVHR8EWDBWMFSgUqBQ
+# hk5odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkRzRUaW1l
+# U3RhbXBpbmdSU0E0MDk2U0hBMjU2MjAyNUNBMS5jcmwwIAYDVR0gBBkwFzAIBgZn
+# gQwBBAIwCwYJYIZIAYb9bAcBMA0GCSqGSIb3DQEBCwUAA4ICAQBlKq3xHCcEua5g
+# QezRCESeY0ByIfjk9iJP2zWLpQq1b4URGnwWBdEZD9gBq9fNaNmFj6Eh8/YmRDfx
+# T7C0k8FUFqNh+tshgb4O6Lgjg8K8elC4+oWCqnU/ML9lFfim8/9yJmZSe2F8AQ/U
+# dKFOtj7YMTmqPO9mzskgiC3QYIUP2S3HQvHG1FDu+WUqW4daIqToXFE/JQ/EABgf
+# ZXLWU0ziTN6R3ygQBHMUBaB5bdrPbF6MRYs03h4obEMnxYOX8VBRKe1uNnzQVTeL
+# ni2nHkX/QqvXnNb+YkDFkxUGtMTaiLR9wjxUxu2hECZpqyU1d0IbX6Wq8/gVutDo
+# jBIFeRlqAcuEVT0cKsb+zJNEsuEB7O7/cuvTQasnM9AWcIQfVjnzrvwiCZ85EE8L
+# UkqRhoS3Y50OHgaY7T/lwd6UArb+BOVAkg2oOvol/DJgddJ35XTxfUlQ+8Hggt8l
+# 2Yv7roancJIFcbojBcxlRcGG0LIhp6GvReQGgMgYxQbV1S3CrWqZzBt1R9xJgKf4
+# 7CdxVRd/ndUlQ05oxYy2zRWVFjF7mcr4C34Mj3ocCVccAvlKV9jEnstrniLvUxxV
+# ZE/rptb7IRE2lskKPIJgbaP5t2nGj/ULLi49xTcBZU8atufk+EMF/cWuiC7POGT7
+# 5qaL6vdCvHlshtjdNXOCIUjsarfNZzGCBJswggSXAgEBMG4wWjELMAkGA1UEBhMC
+# TFYxGTAXBgNVBAoTEEVuVmVycyBHcm91cCBTSUExMDAuBgNVBAMTJ0dvR2V0U1NM
+# IEc0IENTIFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0EtMQIQAdazdTZfIM2RHdcv5fmT
+# ZDAJBgUrDgMCGgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG
+# 9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIB
+# FTAjBgkqhkiG9w0BCQQxFgQUDo5bg44ErEKM/+UgkGLTTVVHoYowCwYHKoZIzj0C
+# AQUABGYwZAIwKE9RpGplZgcz9byYusdaVLaBghlIRheEog+YPkHg6tEXKiXAB7Xy
+# 5Grod2Vn42UcAjBICRAGWwBs7JeEUY4pYZ4/LSVbWp6QVngBxRffiNO+OXFCSkOM
+# 3KtffS8O69leZZOhggMmMIIDIgYJKoZIhvcNAQkGMYIDEzCCAw8CAQEwfTBpMQsw
+# CQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERp
+# Z2lDZXJ0IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIw
+# MjUgQ0ExAhAKgO8YS43xBYLRxHanlXRoMA0GCWCGSAFlAwQCAQUAoGkwGAYJKoZI
+# hvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjYwNjI1MTY1ODA1
+# WjAvBgkqhkiG9w0BCQQxIgQgN7OuV/65tVL+V3AaWqtrwo2yuV0RlGuomth3tMGy
+# TK0wDQYJKoZIhvcNAQEBBQAEggIAVjpNaDgk0o1IVfZiokA7gXcOAyAhUNAxmcce
+# nsrIXVhFYygcTYqv58hHDWiyr9ok+BVlthclwXwY9qk+ZhVrq3IpMxxGRgU1A8Bv
+# +PoVH6AsckWa4R7SMZP2xBe5rB52CzH2GvdFzAZNou5bsydGfz6/IGWVq8fgeQTk
+# T1hiL3to8OcMMZniypToF4Umx8KaTcYXbdJVqIi652zXF4X+N2b713djDCE4CNVV
+# acHTjvdlTq799nUkS/x75X2y9+g9MXQA7j6TDmf9qX5Kbw3ZVBqbK+IeA3FuwEWZ
+# 4mQbOybpEyioCQAZ6gOZAO73Q7EKI85RoQsbKvNQtznkjKB/m61BqxPH2d6+Clov
+# oCbSQqTXT6pOR/TRlCv6iV36S3HFMV7mhoWew7dPGUXWKKkvYt6B+eI9tNy9c2mE
+# T4DeQEeYbMEhSe8IuV8WuB5RTjsMwPZZQMqzQ6ipCzWg2xLs/KgN7JjNXhTe+r2M
+# WQRdOCMfkwC20lh4oS5rm2TMDQWyKeDDQr/bKb6WmfAhN9obriKQ3wYBul6yA/Si
+# 7XPo8YOWejt5MutOZFbx1zrD795L7G350kIx4yT6g7oguUehuKoTQIPs4BrNUrTA
+# qxiZfXYG94m+i9AWogi4aGj8Cizt81EbUXOqdDyTyhUl4FQZIq5jSlu7QuARwuZ3
+# u54u778=
 # SIG # End signature block
