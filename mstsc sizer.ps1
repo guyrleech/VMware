@@ -58,7 +58,10 @@
     2026/05/14 @guyrleech  Added  -asyncActions
     2026/06/09 @guyrleech  Added Azure VMs
     2026/06/18 @guyrleech  Added AVD checkbox on Azure tab and AVD columns
-
+    2026/06/30 @guyrleech  Added Azure context menu option to open selected VM(s) in Azure Portal
+    2026/07/03 @guyrleech  Added Azure AVD Run context menu item to run PowerShell on selected VMs and show output
+    2026/07/06 @guyrleech  Added support for Azure hibernate context menu action
+    2026/07/07 @guyrleech  Changed AVD tab a lot
     ## TODO persist the "comment" column in memory so that it is available when undocked and redocked
     ## TODO make hypervisor operations async with a watcher thread
     ## TODO add history tab which is disabled by default (and thus audit)
@@ -69,7 +72,7 @@
 #>
 
 <#
-Copyright © 2025 Guy Leech
+Copyright © 2026 Guy Leech
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, 
 including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -116,6 +119,10 @@ Param
     [switch]$reverse ,
     [string]$remove , ## ^GL([AH]V)?[SW]\d+
     [int]$windowWaitTimeSeconds = 20 ,
+    [ValidateRange(30,3600)]
+    [int]$azureRunJobTimeoutSeconds = 120 ,
+    [ValidateRange(30,3600)]
+    [int]$azureAuthenticateTimeoutSeconds = 120 ,
     [int]$pollForWindowEveryMilliseconds = 333 ,
     [string]$tempFolder = $(Join-Path -Path $env:temp -ChildPath 'Guy Leech mstsc Sizer') ,
     [string]$exe = 'mstsc.exe' ,
@@ -140,6 +147,7 @@ $script:targetItemData = $null
 $script:azureColumnFilters = @{}
 $script:azureColumnHeaders = @{}
 $script:azureSelectedSubscription = $null
+$script:azureLastGetAzVmCall = $null
 
 # keep user added comments so can set when displays change
 ##$script:itemscopy = New-Object -TypeName System.Collections.Generic.List[object]
@@ -454,21 +462,26 @@ drivestoredirect:s:$drivesToRedirect
                         <ColumnDefinition Width="1*" />
                     </Grid.ColumnDefinitions>
 
+                    <Label x:Name="labelAzureLastGetAzVmCall" Content="Last Fetch: n/a" Grid.Row="0" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
                     <Label x:Name="labelAzureVMs" Content="0 VMs" Grid.Row="1" Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
 
-                    <Label Content="Tenant" Grid.Row="0" Grid.Column="2" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
-                    <TextBox x:Name="textBoxAzureTenant" Grid.Row="1" Grid.Column="2" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" IsReadOnly="True" Background="#F0F0F0" />
-                    <Label Content="Filter" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
-                    <TextBox x:Name="textBoxAzureFilter" Grid.Row="1" Grid.Column="1" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
-                    <CheckBox x:Name="checkBoxAzureRegEx" Content="RegE_x" Grid.Row="1" Grid.Column="1" Margin="5,40,0,0" VerticalAlignment="Top" />
-                    <CheckBox x:Name="checkBoxAzureAllVMs" Content="_All VMs" Grid.Row="1" Grid.Column="1" Margin="5,70,0,0" VerticalAlignment="Top" />
-                    <CheckBox x:Name="checkBoxAzureAVD" Content="_AVD" Grid.Row="1" Grid.Column="1" Margin="5,100,0,0" VerticalAlignment="Top" />
+                    <Label Content="Tenant" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
+                    <Grid Grid.Row="1" Grid.Column="1" Margin="5" VerticalAlignment="Top">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBox x:Name="textBoxAzureTenant" Grid.Row="0" TextWrapping="Wrap" VerticalAlignment="Top" IsReadOnly="True" Background="#F0F0F0" />
+                        <CheckBox x:Name="checkBoxAzureAllVMs" Content="_All VMs" Grid.Row="1" Margin="0,6,0,0" VerticalAlignment="Top" />
+                        <CheckBox x:Name="checkBoxAzureAVD" Content="_AVD" Grid.Row="2" Margin="0,4,0,0" VerticalAlignment="Top" />
+                    </Grid>
 
-                    <RadioButton x:Name="radioButtonAzureConnectByIP" Content="Connect by _IP" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0"  GroupName="GroupBy"/>
-                    <RadioButton x:Name="radioButtonAzureConnectByName"   Content="Connect by _Name" Grid.Row="1" Grid.Column="3" Margin="5,70,0,0"  GroupName="GroupBy" IsChecked="True"/>
+                    <RadioButton x:Name="radioButtonAzureConnectByIP" Content="Connect by _IP" Grid.Row="1" Grid.Column="3" Margin="5,40,0,0"  GroupName="GroupBy" IsEnabled="False"/>
+                    <RadioButton x:Name="radioButtonAzureConnectByName"   Content="Connect by _Name" Grid.Row="1" Grid.Column="3" Margin="5,70,0,0"  GroupName="GroupBy" IsChecked="True" IsEnabled="False"/>
 
                     <Label Content="RDP Port" Grid.Row="0" Grid.Column="3" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="5" />
-                    <TextBox x:Name="textBoxAzureRDPPort" Grid.Row="1" Grid.Column="3" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" />
+                    <TextBox x:Name="textBoxAzureRDPPort" Grid.Row="1" Grid.Column="3" Margin="5" TextWrapping="Wrap" VerticalAlignment="Top" IsEnabled="False" />
 
                     <ListView x:Name="listViewAzureVMs" Grid.Row="2" Grid.ColumnSpan="4" Margin="5" VerticalAlignment="Stretch" SelectionMode="Multiple">
                         <ListView.View>
@@ -486,16 +499,15 @@ drivestoredirect:s:$drivesToRedirect
                             <ContextMenu>
                                 <MenuItem Header="Power" x:Name="AzurePowerContextMenu">
                                     <MenuItem Header="Power On" x:Name="AzurePowerOnContextMenu" />
-                                    <MenuItem Header="Power Off" x:Name="AzurePowerOffContextMenu" />
-                                    <MenuItem Header="Shutdown" x:Name="AzureShutdownContextMenu" />
+                                    <MenuItem Header="Power Off &amp; Deallocate" x:Name="AzurePowerOffContextMenu" />
+                                    <MenuItem Header="Shutdown &amp; Deallocate" x:Name="AzureShutdownContextMenu" />
                                     <MenuItem Header="Restart" x:Name="AzureRestartContextMenu" />
-                                    <MenuItem Header="Resume" x:Name="AzureResumeContextMenu" />
-                                    <MenuItem Header="Save" x:Name="AzureSaveContextMenu" />
-                                    <MenuItem Header="Suspend" x:Name="AzureSuspendContextMenu" />
+                                    <MenuItem Header="Hibernate" x:Name="AzureHibernateContextMenu" />
                                 </MenuItem>
                                 <MenuItem Header="Config" x:Name="AzureConfigContextMenu">
                                     <MenuItem Header="Run" x:Name="AzureRunContextMenu" />
                                     <MenuItem Header="Detail" x:Name="AzureDetailContextMenu" />
+                                    <MenuItem Header="Extensions + Applications" x:Name="AzureExtensionsApplicationsContextMenu" />
                                     <MenuItem Header="Rename" x:Name="AzureRenameMenu" />
                                     <MenuItem Header="Reconfigure" x:Name="AzureReconfigureMenu" />
                                 </MenuItem>
@@ -524,6 +536,7 @@ drivestoredirect:s:$drivesToRedirect
                                     <MenuItem Header="Templated" x:Name="AzureNewVMFromTemplateContextMenu" />
                                 </MenuItem>
                                 -->
+                                <MenuItem Header="Open in Portal" x:Name="AzureOpenInPortalContextMenu" />
                                 <MenuItem Header="Name to Clipboard" x:Name="AzureNameToClipboard" />
                                 <MenuItem Header="NICS" x:Name="AzureNICSContextMenu">
                                     <MenuItem Header="Disconnect NIC" x:Name="AzureDisconnectNICContextMenu" />
@@ -539,10 +552,10 @@ drivestoredirect:s:$drivesToRedirect
 
                     <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="5">
                         <Button x:Name="btnLaunchAzureOptions" Content="_Launch" Width="100" Margin="5" />
-                        <Button x:Name="buttonAzureConnect" Content="C_onnect" Width="100" Margin="5" />
+                        <Button x:Name="buttonAzureConnect" Content="_Authenticate" Width="100" Margin="5" IsEnabled="True" />
                                                 <Button x:Name="buttonAzureSubscription" Content="_Subscription" Width="100" Margin="5" />
                       <!-- Apply Filter does the same  <Button x:Name="btnConnectAzure" Content="_Connect" Width="100" Margin="5" />   -->
-                        <Button x:Name="buttonAzureApplyFilter" Content="Apply _Filter" Width="100" Margin="5" />
+                        <Button x:Name="buttonAzureApplyFilter" Content="_Refresh" Width="100" Margin="5" />
                         <Button x:Name="buttonAzureClearFilter" Content="Clea_r Filter" Width="100" Margin="5" />
                         <Button x:Name="buttonAzureBuyMeACoffee" Cursor="Pen" ToolTip="Buy me a coffee!">
                             <Viewbox Stretch="Uniform">
@@ -617,19 +630,22 @@ drivestoredirect:s:$drivesToRedirect
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:WPF_Scratchpad"
         mc:Ignorable="d"
-        Title="Window1" Height="450" Width="800">
-    <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="4*"/>
-            <ColumnDefinition Width="30*"/>
-            <ColumnDefinition/>
-            <ColumnDefinition Width="365*"/>
-        </Grid.ColumnDefinitions>
-        <TextBox x:Name="textboxInputText" HorizontalAlignment="Left" Height="85" Margin="45,52,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="347" Grid.ColumnSpan="3" Grid.Column="1"/>
-        <Label x:Name="lblInputTextLabel" Content="Label" HorizontalAlignment="Left" Height="27" Margin="45,10,0,0" VerticalAlignment="Top" Width="253" Grid.ColumnSpan="3" Grid.Column="1"/>
-        <Button x:Name="btnInputTextOK" Content="OK" HorizontalAlignment="Left" Height="39" Margin="45,157,0,0" VerticalAlignment="Top" Width="89" Grid.ColumnSpan="3" IsDefault="True" Grid.Column="1"/>
-        <Button x:Name="btnInputTextCancel" Content="Cancel" HorizontalAlignment="Left" Height="39" Margin="110,157,0,0" VerticalAlignment="Top" Width="88" Grid.Column="3" IsCancel="True"/>
+        Title="Window1" Height="450" Width="800" MinHeight="260" MinWidth="460">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
+        <Label x:Name="lblInputTextLabel" Content="Label" Grid.Row="0" Margin="0,0,0,8" HorizontalAlignment="Stretch" VerticalAlignment="Top"/>
+
+        <TextBox x:Name="textboxInputText" Grid.Row="1" Margin="0" TextWrapping="Wrap" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button x:Name="btnInputTextOK" Content="OK" Height="32" MinWidth="90" Margin="0,0,8,0" IsDefault="True"/>
+            <Button x:Name="btnInputTextCancel" Content="Cancel" Height="32" MinWidth="90" IsCancel="True"/>
+        </StackPanel>
     </Grid>
 </Window>
 '@
@@ -1486,6 +1502,18 @@ Function Test-AzureColumnFilters
 
 Function Update-AzureVMLabel
 {
+    if( $null -ne $WPFlabelAzureLastGetAzVmCall )
+    {
+        if( $null -ne $script:azureLastGetAzVmCall )
+        {
+            $WPFlabelAzureLastGetAzVmCall.Content = "Last Fetch: $( $script:azureLastGetAzVmCall.ToString( 'G' ) )"
+        }
+        else
+        {
+            $WPFlabelAzureLastGetAzVmCall.Content = 'Last Fetch: n/a'
+        }
+    }
+
     [int]$totalCount = $WPFlistViewAzureVMs.Items.Count
     [int]$visibleCount = $totalCount
 
@@ -2633,6 +2661,7 @@ Function Add-AzureVMsToListView
         $wpftextBoxAzureTenant.Text = ''
     }
     Write-Verbose "$(Get-Date -Format G): Getting Azure VMs (all=$allVMs, filter=$filter, regex=$regex)"
+    $script:azureLastGetAzVmCall = Get-Date
     $script:vms = @( Get-AZVM -ErrorVariable azureError -Status | Where-Object {  $_.PowerState -match $powerState -and  (( $regex -and $_.Name -match $filter ) -or ( -Not $regex -and ( [string]::IsNullOrEmpty( $filter ) -or $_.Name -like $filter ))) } | Sort-Object -Property Name )
     if( $azureError )
     {
@@ -2643,7 +2672,7 @@ Function Add-AzureVMsToListView
     if( $script:vms.count -eq 0 )
     {
         Apply-AzureColumnFilters
-        $WPFlabelAzureVMs.Content = "0 VMs"
+        Update-AzureVMLabel
         return
     }
     [array]$hostpools = @{}
@@ -2734,6 +2763,7 @@ Function Add-AzureVMsToListView
             ResourceGroup = $vm.ResourceGroupName
             Size = $vm.HardwareProfile.VmSize
             Subscription = $subscriptions | Where-Object Id -eq $subscriptionId | Select-Object -ExpandProperty Name
+            SubscriptionId = $subscriptionId
             Created = $vm.TimeCreated
         }
         if( $WPFCheckBoxAzureAVD.IsChecked )
@@ -2831,6 +2861,283 @@ Function Set-AzureSessionMenuState
     {
         $WPFAzureSessionContextMenu.IsEnabled = $avdEnabled
     }
+
+    if( $null -ne $WPFAzureRunContextMenu )
+    {
+        $WPFAzureRunContextMenu.IsEnabled = $true
+    }
+}
+
+Function Get-AzureRunCommandText
+{
+    if( -Not ( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML ) )
+    {
+        return $null
+    }
+
+    if( [string]::IsNullOrWhiteSpace( $script:azureRunCommandLastText ) )
+    {
+        $persistedRunText = Get-ItemProperty -Path $configKey -Name 'AzureRunCommandText' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty 'AzureRunCommandText' -ErrorAction SilentlyContinue
+        if( -Not [string]::IsNullOrWhiteSpace( $persistedRunText ) )
+        {
+            $script:azureRunCommandLastText = [string]$persistedRunText
+        }
+    }
+
+    $WPFbtnInputTextOk.Add_Click({
+        $_.Handled = $true
+        $textInputWindow.DialogResult = $true
+        $textInputWindow.Close()
+    })
+
+    [void]( $textInputWindow.Title = 'Run PowerShell Script' )
+    [void]( $WPFlblInputTextLabel.Content = 'Enter the PowerShell script to run on the selected AVD VM(s)' )
+    [void]( $WPFtextboxInputText.AcceptsReturn = $true )
+    [void]( $WPFtextboxInputText.VerticalScrollBarVisibility = 'Auto' )
+    [void]( $WPFtextboxInputText.TextWrapping = 'Wrap' )
+    if( -Not [string]::IsNullOrWhiteSpace( $script:azureRunCommandLastText ) )
+    {
+        [void]( $WPFtextboxInputText.Text = $script:azureRunCommandLastText )
+    }
+    [void]$WPFtextboxInputText.Focus()
+    [void]$WPFtextboxInputText.Select( $WPFtextboxInputText.Text.Length , 0 )
+
+    if( -Not $textInputWindow.ShowDialog() )
+    {
+        return $null
+    }
+
+    [string]$scriptText = $WPFtextboxInputText.Text
+    if( [string]::IsNullOrWhiteSpace( $scriptText ) )
+    {
+        return $null
+    }
+
+    $script:azureRunCommandLastText = $scriptText
+    if( -Not ( Test-Path -Path $configKey ) )
+    {
+        $null = New-Item -Path $configKey -ItemType Key -Force -ErrorAction SilentlyContinue
+    }
+    if( Test-Path -Path $configKey )
+    {
+        $null = Set-ItemProperty -Path $configKey -Name 'AzureRunCommandText' -Value $script:azureRunCommandLastText -Force -ErrorAction SilentlyContinue
+    }
+
+    return $scriptText.Trim()
+}
+
+Function Show-AzureRunCommandOutputWindow
+{
+    Param
+    (
+        [Parameter(Mandatory)][string]$computerName ,
+        [Parameter(Mandatory)][string]$scriptText ,
+        [string]$outputText
+    )
+
+    $normalizeNewLines = {
+        Param(
+            [string]$text
+        )
+
+        if( $null -eq $text )
+        {
+            return ''
+        }
+
+        # WinForms multiline textbox renders consistently when line endings are CRLF.
+        return ( $text -split "`r`n|`n|`r" ) -join "`r`n"
+    }
+
+    [string]$normalizedScriptText = & $normalizeNewLines $scriptText
+    [string]$normalizedOutputText = & $normalizeNewLines $outputText
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Run Output - $computerName"
+    $form.Size = New-Object System.Drawing.Size(900, 640)
+    $form.StartPosition = 'CenterScreen'
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Dock = 'Fill'
+    $textBox.Multiline = $true
+    $textBox.ReadOnly = $true
+    $textBox.ScrollBars = 'Both'
+    $textBox.WordWrap = $false
+    $textBox.Font = New-Object System.Drawing.Font( 'Consolas' , 9 )
+    $textBox.Text = "Computer: $computerName`r`n`r`nCommand:`r`n$normalizedScriptText`r`n`r`nOutput:`r`n$(if( [string]::IsNullOrWhiteSpace( $normalizedOutputText ) ) { '<no output returned>' } else { $normalizedOutputText })"
+
+    [void]$form.Controls.Add( $textBox )
+    [void]$form.ShowDialog()
+}
+
+Function Convert-AzureRunCommandResultToText
+{
+    Param
+    (
+        $runCommandResult
+    )
+
+    if( $null -eq $runCommandResult )
+    {
+        return ''
+    }
+
+    $messages = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    $addMessage = {
+        Param(
+            [string]$text
+        )
+
+        if( [string]::IsNullOrWhiteSpace( $text ) )
+        {
+            return
+        }
+
+        [string]$trimmedText = $text.Trim()
+        if( -Not [string]::IsNullOrWhiteSpace( $trimmedText ) -and $seen.Add( $trimmedText ) )
+        {
+            [void]$messages.Add( $trimmedText )
+        }
+    }
+
+    $extractFromStatusObject = {
+        Param(
+            $statusObject
+        )
+
+        $convertValueToText = {
+            Param(
+                $value
+            )
+
+            if( $null -eq $value )
+            {
+                return ''
+            }
+
+            if( ( $value -is [System.Collections.IEnumerable] ) -and -Not ( $value -is [string] ) )
+            {
+                return ( @( $value ) | ForEach-Object { if( $null -eq $_ ) { '' } else { [string]$_ } } | Where-Object { -Not [string]::IsNullOrWhiteSpace( $_ ) } ) -join "`r`n"
+            }
+
+            return [string]$value
+        }
+
+        if( $null -eq $statusObject )
+        {
+            return
+        }
+
+        if( $statusObject -is [string] )
+        {
+            & $addMessage $statusObject
+            return
+        }
+
+        [string]$displayStatus = $null
+        if( $statusObject.PSObject.Properties.Match( 'DisplayStatus' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $statusObject.DisplayStatus ) )
+        {
+            $displayStatus = $statusObject.DisplayStatus
+        }
+        elseif( $statusObject.PSObject.Properties.Match( 'Code' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $statusObject.Code ) )
+        {
+            $displayStatus = $statusObject.Code
+        }
+
+        [string]$messageText = $null
+        if( $statusObject.PSObject.Properties.Match( 'Message' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $statusObject.Message ) )
+        {
+            $messageText = & $convertValueToText $statusObject.Message
+        }
+        elseif( $statusObject.PSObject.Properties.Match( 'Output' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $statusObject.Output ) )
+        {
+            $messageText = & $convertValueToText $statusObject.Output
+        }
+
+        if( -Not [string]::IsNullOrWhiteSpace( $messageText ) )
+        {
+            try
+            {
+                $jsonMessage = $messageText | ConvertFrom-Json -ErrorAction Stop
+                if( $null -ne $jsonMessage )
+                {
+                    if( $jsonMessage.PSObject.Properties.Match( 'stdout' ).Count -gt 0 )
+                    {
+                        [string]$stdoutText = & $convertValueToText $jsonMessage.stdout
+                        if( -Not [string]::IsNullOrWhiteSpace( $stdoutText ) )
+                        {
+                            & $addMessage "[stdout]`r`n$stdoutText"
+                        }
+                    }
+                    if( $jsonMessage.PSObject.Properties.Match( 'stderr' ).Count -gt 0 )
+                    {
+                        [string]$stderrText = & $convertValueToText $jsonMessage.stderr
+                        if( -Not [string]::IsNullOrWhiteSpace( $stderrText ) )
+                        {
+                            & $addMessage "[stderr]`r`n$stderrText"
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                & $addMessage $messageText
+            }
+        }
+
+        if( -Not [string]::IsNullOrWhiteSpace( $displayStatus ) )
+        {
+            & $addMessage $displayStatus
+        }
+    }
+
+    [array]$candidateCollections = @()
+    if( $runCommandResult.PSObject.Properties.Match( 'Value' ).Count -gt 0 )
+    {
+        $candidateCollections += @( $runCommandResult.Value )
+    }
+    if( $runCommandResult.PSObject.Properties.Match( 'Output' ).Count -gt 0 )
+    {
+        $candidateCollections += @( $runCommandResult.Output )
+    }
+
+    if( ( $runCommandResult -is [System.Collections.IEnumerable] ) -and -Not ( $runCommandResult -is [string] ) )
+    {
+        $candidateCollections += @( $runCommandResult )
+    }
+    else
+    {
+        $candidateCollections += @( $runCommandResult )
+    }
+
+    ForEach( $collection in $candidateCollections )
+    {
+        if( $null -eq $collection )
+        {
+            continue
+        }
+
+        if( ( $collection -is [System.Collections.IEnumerable] ) -and -Not ( $collection -is [string] ) )
+        {
+            ForEach( $item in $collection )
+            {
+                & $extractFromStatusObject $item
+            }
+        }
+        else
+        {
+            & $extractFromStatusObject $collection
+        }
+    }
+
+    if( $messages.Count -eq 0 )
+    {
+        return ( $runCommandResult | Format-List * -Force | Out-String ).Trim()
+    }
+
+    ( $messages -join "`r`n`r`n" ).Trim()
 }
 
 Function Select-AzureSubscription
@@ -2944,11 +3251,98 @@ Function Select-AzureSubscription
     {
         $null = Set-AzContext -SubscriptionId $selectedSubscription.Id -ErrorAction Stop
         $script:azureSelectedSubscription = $selectedSubscription
-        Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+        Add-AzureVMsToListView -filter '' -regex $false -all $WPFcheckBoxAzureAllVMs.IsChecked
     }
     catch
     {
         [void][Windows.MessageBox]::Show( $mainWindow , "Failed to set subscription context to $($selectedSubscription.Name)`n$($_.Exception.Message)" , 'Azure Subscription' , 'Ok' ,'Error' )
+    }
+}
+
+Function Connect-AzureAccountWithTimeout
+{
+    Param
+    (
+        [int]$timeoutSeconds = 120
+    )
+
+    Import-Module -Name Az.Accounts -Verbose:$false
+
+    [string]$contextPath = Join-Path -Path $env:TEMP -ChildPath ( 'mstsc-sizer-auth-{0}.json' -f ([guid]::NewGuid().ToString()) )
+    $authJob = $null
+
+    try
+    {
+        $authJob = Start-Job -Name ( "Azure_Auth_{0}" -f ([guid]::NewGuid().ToString('N')) ) -ArgumentList $contextPath -ScriptBlock {
+            Param
+            (
+                [string]$outputContextPath
+            )
+
+            Import-Module -Name Az.Accounts -Verbose:$false
+
+            try
+            {
+                $connection = Connect-AzAccount -ErrorAction Stop
+                if( $null -eq $connection )
+                {
+                    throw 'No authentication result returned by Connect-AzAccount.'
+                }
+
+                Save-AzContext -Path $outputContextPath -Force -ErrorAction Stop | Out-Null
+                [pscustomobject]@{
+                    Success = $true
+                    ContextPath = $outputContextPath
+                }
+            }
+            catch
+            {
+                [pscustomobject]@{
+                    Success = $false
+                    ContextPath = $outputContextPath
+                    ErrorMessage = $_.Exception.Message
+                }
+            }
+        }
+
+        if( $null -eq ( Wait-Job -Job $authJob -Timeout $timeoutSeconds ) )
+        {
+            Stop-Job -Job $authJob -ErrorAction SilentlyContinue | Out-Null
+            throw "Timed out waiting $timeoutSeconds seconds for Azure authentication."
+        }
+
+        [array]$authOutput = @( Receive-Job -Job $authJob -ErrorAction SilentlyContinue )
+        $authResult = $authOutput | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Match( 'Success' ).Count -gt 0 } | Select-Object -Last 1
+
+        if( $null -eq $authResult )
+        {
+            throw 'Azure authentication did not return a usable result.'
+        }
+
+        if( -Not $authResult.Success )
+        {
+            throw $(if( [string]::IsNullOrWhiteSpace( $authResult.ErrorMessage ) ) { 'Azure authentication failed.' } else { $authResult.ErrorMessage })
+        }
+
+        if( -Not ( Test-Path -Path $authResult.ContextPath ) )
+        {
+            throw 'Azure authentication completed but no context file was produced.'
+        }
+
+        Import-AzContext -Path $authResult.ContextPath -ErrorAction Stop | Out-Null
+        return Get-AzContext -ErrorAction SilentlyContinue
+    }
+    finally
+    {
+        if( $null -ne $authJob )
+        {
+            Remove-Job -Job $authJob -Force -ErrorAction SilentlyContinue
+        }
+
+        if( Test-Path -Path $contextPath )
+        {
+            Remove-Item -Path $contextPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -3313,7 +3707,7 @@ Function Show-AzureAVDSessionListView
 
     if( $refreshAzureList )
     {
-        Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+        Add-AzureVMsToListView -filter '' -regex $false -all $WPFcheckBoxAzureAllVMs.IsChecked
     }
 }
 
@@ -3593,6 +3987,7 @@ Function Process-Action
         [hashtable]$clipboardParameters = @{}
         [bool]$refreshAzureList = $false
         [pscustomobject]$azureSessionMessage = $null
+        [string]$azureRunCommandText = $null
         [hashtable]$async = @{}
         if( $asyncActions )
         {
@@ -3602,472 +3997,974 @@ Function Process-Action
         {
             $async.Add( 'PassThru' , $true )
         }
-        [array]$jobs = @( ForEach( $selection in $selectedVMs )
-        {
-            $loopIterations++
-            
-            if( $operation -ieq 'DeleteComputer' ) ## not Hyper-V context
+
+        try
+        { 
+            if( $operation -ieq 'Azure_RunOn' )
             {
-                Write-Verbose -Message "Deleting computer $selection"
-                $GUIobject.Items.RemoveAt( $selection )
-                continue
-            }
-            if( $Operation -match 'PowerOn|Detail|Resume|Clipboard|TakeSnapshot|MessageSession|((Manage|Revert|Delete).*Snapshot)' ) ## don't need to prompt or will prompt with more information later
-            {
-                $answer = 'yes'
-            }
-            elseif( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
-            {
-                [string]$buttons = 'YesNo'
-                [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
+                $azureRunCommandText = Get-AzureRunCommandText
+                if( [string]::IsNullOrWhiteSpace( $azureRunCommandText ) )
                 {
-                    ## action may be prefixed with the hypervisor eg HyperV or Azure so remove that since on that specific tab anyway
-                    "Are you sure you want to $($operation -replace '^[^_]*_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($selection.Name) Only or Cancel for None"
-                    $buttons = 'YesNoCancel'
+                    return
                 }
-                else
-                {
-                    "Are you sure you want to $($operation -replace '^[^_]*_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selection.Name)?"
-                })
-                ## make it modal to the main window
-                $answer = [Windows.MessageBox]::Show( $mainWindow , $prompt , 'Confirm Power Operation' , $buttons ,'Question' )
-            }
-            if( [string]::IsNullOrEmpty( $answer ) -or $answer -ieq 'cancel' )
-            {
-                $answer = $null
-                break
-            }
-            ## for a single VM selection, 'No' means skip; for multiple VMs, 'No' means do this one and re-prompt for the next
-            if( $answer -ieq 'No' -and $selectedVMs.Count -le 1 )
-            {
-                break
-            }
-            ## else if $answer = no then we are just performing on this VM and will prompt again next time round this loop           
-            if( $operation -ieq 'NameToClipboard' )
-            {
-                $selection.Name | Set-Clipboard @clipboardParameters
-            }
-            elseif( $operation -ieq 'Azure_PowerOn' )
-            {
-                $actionStatus = $null
-                $actionStatus = Start-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait
-            }
-            elseif( $operation -ieq 'Azure_Shutdown' )
-            {
-                $actionStatus = $null
-                $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Force
-            }
-            elseif( $operation -ieq 'Azure_Poweroff' )
-            {
-                $actionStatus = $null
-                $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Force -SkipShutdown -Force
-            }
-            elseif( $operation -imatch '^Azure_.*Session$' )
-            {
-                try
-                {
-                    $sessionHost = $null
-                    $sessionHost = Get-AzureAVDSessionHost -selection $selection
 
-                    if( $operation -ieq 'Azure_DrainModeOnSession' -or $operation -ieq 'Azure_DrainModeOffSession' )
+                # Set busy cursor after the modal run-command dialog closes so it is visible during job execution.
+                $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
+                [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
+                [void]$mainWindow.Dispatcher.Invoke(
+                    [System.Windows.Threading.DispatcherPriority]::Render,
+                    [System.Action]{ }
+                )
+            }
+            else
+            {
+                $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
+            }
+
+            [array]$jobs = @( ForEach( $selection in $selectedVMs )
+            {
+                $loopIterations++
+                
+                if( $operation -ieq 'DeleteComputer' ) ## not Hyper-V context
+                {
+                    Write-Verbose -Message "Deleting computer $selection"
+                    $GUIobject.Items.RemoveAt( $selection )
+                    continue
+                }
+
+                if( $Operation -match 'PowerOn|Detail|Resume|Clipboard|TakeSnapshot|MessageSession|OpenInPortal|((Manage|Revert|Delete).*Snapshot)' ) ## don't need to prompt or will prompt with more information later
+                {
+                    $answer = 'yes'
+                }
+                elseif( [string]::IsNullOrEmpty( $answer ) -or $answer -eq 'No' )
+                {
+                    [string]$buttons = 'YesNo'
+                    [string]$prompt = $(if( $selectedVMs.Count -gt 1 )
                     {
-                        [bool]$allowNewSession = $operation -ieq 'Azure_DrainModeOffSession'
-                        [string]$payload = (@{ properties = @{ allowNewSession = $allowNewSession } } | ConvertTo-Json -Compress)
-                        $null = Invoke-AzRestMethod -Method PATCH -Path "$($sessionHost.Id)?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
-                        $refreshAzureList = $true
+                        ## action may be prefixed with the hypervisor eg HyperV or Azure so remove that since on that specific tab anyway
+                        "Are you sure you want to $($operation -replace '^[^_]*_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selectedVMs.Count - $loopIterations + 1) VMs?`nYes for All , No for $($selection.Name) Only or Cancel for None"
+                        $buttons = 'YesNoCancel'
+                    }
+                    else
+                    {
+                        "Are you sure you want to $($operation -replace '^[^_]*_' -creplace '([a-zA-Z])([A-Z])' , '$1 $2') $($selection.Name)?"
+                    })
+                    ## make it modal to the main window
+                    $answer = [Windows.MessageBox]::Show( $mainWindow , $prompt , 'Confirm Power Operation' , $buttons ,'Question' )
+                }
+                if( [string]::IsNullOrEmpty( $answer ) -or $answer -ieq 'cancel' )
+                {
+                    $answer = $null
+                    break
+                }
+                ## for a single VM selection, 'No' means skip; for multiple VMs, 'No' means do this one and re-prompt for the next
+                if( $answer -ieq 'No' -and $selectedVMs.Count -le 1 )
+                {
+                    break
+                }
+                ## else if $answer = no then we are just performing on this VM and will prompt again next time round this loop           
+                if( $operation -ieq 'NameToClipboard' )
+                {
+                    $selection.Name | Set-Clipboard @clipboardParameters
+                }
+                elseif( $operation -ieq 'Azure_PowerOn' )
+                {
+                    $actionStatus = $null
+                    $actionStatus = Start-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait
+                }
+                elseif( $operation -ieq 'Azure_Shutdown' )
+                {
+                    $actionStatus = $null
+                    $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Force
+                }
+                elseif( $operation -ieq 'Azure_Poweroff' )
+                {
+                    $actionStatus = $null
+                    $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Force -SkipShutdown
+                }
+                elseif( $operation -ieq 'Azure_Restart' )
+                {
+                    $actionStatus = $null
+                    $actionStatus = Restart-AzVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -NoWait
+                }
+                elseif( $operation -ieq 'Azure_Hibernate' )
+                {
+                    $actionStatus = $null
+                    $actionError = $null
+                    $actionStatus = Stop-AZVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Confirm:$false -Nowait -Hibernate -Force -ErrorVariable actionError
+                    if( $null -eq $actionStatus )
+                    {
+                        Write-Warning -Message "Azure hibernate failed for $($selection.Name)"
+                        [void][Windows.MessageBox]::Show( $mainWindow , "Azure hibernate failed for $($selection.Name)`n$($actionError)" , 'Azure Power Operation' , 'Ok' ,'Error' )
+                    }
+                }
+                elseif( $operation -ieq 'Azure_OpenInPortal' )
+                {
+                    [string]$subscriptionId = $selection.SubscriptionId
+                    if( [string]::IsNullOrWhiteSpace( $subscriptionId ) )
+                    {
+                        Write-Warning -Message "No subscription id available for VM $($selection.Name)"
+                        [void][Windows.MessageBox]::Show( $mainWindow , "Unable to determine subscription for $($selection.Name)" , 'Azure Portal' , 'Ok' ,'Error' )
                         continue
                     }
 
-                    [array]$userSessions = @( Get-AzureAVDUserSessions -sessionHostResourceId $sessionHost.Id )
-                    if( $null -eq $userSessions -or $userSessions.Count -eq 0 )
+                    [string]$portalUrl = "https://portal.azure.com/#resource/subscriptions/$([uri]::EscapeDataString($subscriptionId))/resourceGroups/$([uri]::EscapeDataString($selection.ResourceGroup))/providers/Microsoft.Compute/virtualMachines/$([uri]::EscapeDataString($selection.Name))/overview"
+                    Start-Process -FilePath $portalUrl -Verb Open
+                }
+                elseif( $operation -ieq 'Azure_DetailExtensionsApplications' )
+                {
+                    try
                     {
-                        [void][Windows.MessageBox]::Show( $mainWindow , "No active user sessions found on $($selection.Name)" , 'Azure AVD Sessions' , 'Ok' ,'Information' )
-                        continue
-                    }
+                        Import-Module -Name Az.Compute -Verbose:$false
 
-                    if( $operation -ieq 'Azure_MessageSession' )
-                    {
-                        if( $null -eq $azureSessionMessage )
+                        $vm = Get-AzVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -ErrorAction Stop
+                        $vmStatus = Get-AzVM -Name $selection.Name -ResourceGroupName $selection.ResourceGroup -Status -ErrorAction SilentlyContinue
+
+                        [array]$extensions = @()
+                        [string]$extensionsError = $null
+                        try
                         {
-                            $azureSessionMessage = Get-AzureAVDSessionMessage
-                            if( $null -eq $azureSessionMessage )
+                            $extensions = @( Get-AzVMExtension -VMName $selection.Name -ResourceGroupName $selection.ResourceGroup -ErrorAction Stop )
+                        }
+                        catch
+                        {
+                            $extensionsError = $_.Exception.Message
+                        }
+
+                        [hashtable]$extensionStatusByName = @{}
+                        if( $null -ne $vmStatus -and $vmStatus.PSObject.Properties.Match( 'Extensions' ).Count -gt 0 )
+                        {
+                            ForEach( $statusExtension in @( $vmStatus.Extensions ) )
                             {
-                                break
+                                if( $null -ne $statusExtension -and -Not [string]::IsNullOrWhiteSpace( $statusExtension.Name ) )
+                                {
+                                    $extensionStatusByName[ $statusExtension.Name ] = $statusExtension
+                                }
                             }
                         }
-                    }
 
-                    ForEach( $userSession in $userSessions )
-                    {
-                        if( $operation -ieq 'Azure_DisconnectSession' )
+                        $detailsBuilder = New-Object -TypeName System.Text.StringBuilder
+                        [void]$detailsBuilder.AppendLine( "VM: $($selection.Name)" )
+                        [void]$detailsBuilder.AppendLine( "Resource Group: $($selection.ResourceGroup)" )
+                        [void]$detailsBuilder.AppendLine( '' )
+
+                        [void]$detailsBuilder.AppendLine( 'Extensions' )
+                        [void]$detailsBuilder.AppendLine( '----------' )
+                        if( $extensions.Count -gt 0 )
                         {
-                            $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/disconnect?api-version=$AVDAPIversion" -ErrorAction Stop
-                            $refreshAzureList = $true
-                        }
-                        elseif( $operation -ieq 'Azure_LogoffSession' )
-                        {
-                            $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion" -ErrorAction Stop
-                            $refreshAzureList = $true
-                        }
-                        elseif( $operation -ieq 'Azure_ForceLogoffSession' )
-                        {
-                            $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion&force=true" -ErrorAction Stop
-                            $refreshAzureList = $true
-                        }
-                        elseif( $operation -ieq 'Azure_MessageSession' )
-                        {
-                            [string]$payload = (@{ messageTitle = $azureSessionMessage.Title ; messageBody = $azureSessionMessage.Body } | ConvertTo-Json -Compress)
-                            $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/sendMessage?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
-                        }
-                    }
-                }
-                catch
-                {
-                    Write-Warning -Message "Azure AVD session operation failed for $($selection.Name) : $_"
-                    [void][Windows.MessageBox]::Show( $mainWindow , "Azure AVD session operation failed for $($selection.Name)`n$($_.Exception.Message)" , 'Azure AVD Sessions' , 'Ok' ,'Error' )
-                }
-            }
-            elseif( $operation -ieq 'HyperV_PowerOn' )
-            {
-                Hyper-V\Start-VM -VMName $selection.Name @hypervParameters @async
-            }
-            elseif( $operation -ieq 'HyperV_Shutdown' )
-            {
-                Hyper-V\Stop-VM -VMName $selection.Name  @hypervParameters @async
-            }
-            elseif( $operation -ieq 'HyperV_PowerOff' )
-            {
-                Hyper-V\Stop-VM -VMName $selection.Name -TurnOff @hypervParameters -Force -Confirm:$false @async
-            }
-            elseif( $operation -ieq 'HyperV_Restart' )
-            {
-                Hyper-V\Restart-VM -VMName $selection.Name  @hypervParameters -Force -Confirm:$false @async
-            }
-            elseif( $operation -ieq 'HyperV_Resume' )
-            {
-                Hyper-V\Resume-VM -VMName $selection.Name  @hypervParameters -Asjob @async
-            }
-            elseif( $operation -ieq 'HyperV_Suspend' )
-            {
-                Hyper-V\Suspend-VM -VMName $selection.Name @hypervParameters @async
-            }
-            elseif( $operation -ieq 'HyperV_RevertLatestSnapshot' -or $operation -ieq 'HyperV_DeleteLatestSnapshot')
-            {
-                $latestCheckPoint = $null
-                $latestCheckPoint = Get-VMCheckpoint -VMName $selection.Name @hypervParameters | Sort-Object -Property CreationTime -Descending | Select-Object -First 1
-                if( $null -ne $latestCheckPoint )
-                {
-                    if( [Windows.MessageBox]::Show( $mainWindow , "$($latestCheckPoint.CreationTime.ToString('g')) : $($latestCheckPoint.Name)",
-                        "$(if( $operation -match 'delete' ) { 'Delete' } else { 'Restore' }) Snapshot on $($selection.Name)" , 'YesNoCancel' ,'Question' ) -ieq 'yes' )
-                    {
-                        ## do not need hypervparameters as cannot user -computername with a snapshot object as that contains the remote details
-                        if( $operation -match 'delete' )
-                        {
-                            Hyper-V\Remove-VMCheckpoint  -VMSnapshot $latestCheckPoint -Confirm:$false -Passthru
+                            ForEach( $extension in $extensions )
+                            {
+                                [void]$detailsBuilder.AppendLine( "Name: $($extension.Name)" )
+                                [void]$detailsBuilder.AppendLine( "Publisher: $($extension.Publisher)" )
+                                [void]$detailsBuilder.AppendLine( "Type: $($extension.ExtensionType)" )
+                                [void]$detailsBuilder.AppendLine( "Version: $($extension.TypeHandlerVersion)" )
+                                if( $extension.PSObject.Properties.Match( 'ProvisioningState' ).Count -gt 0 )
+                                {
+                                    [void]$detailsBuilder.AppendLine( "Provisioning State: $($extension.ProvisioningState)" )
+                                }
+                                if( $extension.PSObject.Properties.Match( 'EnableAutomaticUpgrade' ).Count -gt 0 )
+                                {
+                                    [void]$detailsBuilder.AppendLine( "Enable Automatic Upgrade: $($extension.EnableAutomaticUpgrade)" )
+                                }
+                                if( $extension.PSObject.Properties.Match( 'AutoUpgradeMinorVersion' ).Count -gt 0 )
+                                {
+                                    [void]$detailsBuilder.AppendLine( "Auto Upgrade Minor Version: $($extension.AutoUpgradeMinorVersion)" )
+                                }
+
+                                if( $extensionStatusByName.ContainsKey( $extension.Name ) )
+                                {
+                                    $statusDetails = $extensionStatusByName[ $extension.Name ]
+                                    if( $statusDetails.PSObject.Properties.Match( 'Statuses' ).Count -gt 0 -and $null -ne $statusDetails.Statuses )
+                                    {
+                                        [array]$statusTexts = @( ForEach( $statusEntry in $statusDetails.Statuses )
+                                        {
+                                            [string]$display = $null
+                                            if( $statusEntry.PSObject.Properties.Match( 'DisplayStatus' ).Count -gt 0 )
+                                            {
+                                                $display = $statusEntry.DisplayStatus
+                                            }
+                                            if( [string]::IsNullOrWhiteSpace( $display ) -and $statusEntry.PSObject.Properties.Match( 'Code' ).Count -gt 0 )
+                                            {
+                                                $display = $statusEntry.Code
+                                            }
+                                            if( -Not [string]::IsNullOrWhiteSpace( $display ) )
+                                            {
+                                                $display
+                                            }
+                                        } )
+
+                                        if( $statusTexts.Count -gt 0 )
+                                        {
+                                            [void]$detailsBuilder.AppendLine( "Status: $($statusTexts -join ' | ')" )
+                                        }
+                                    }
+                                }
+
+                                [void]$detailsBuilder.AppendLine( '' )
+                            }
                         }
                         else
                         {
-                            Hyper-V\Restore-VMCheckpoint -VMSnapshot $latestCheckPoint -Confirm:$false -Passthr
+                            [void]$detailsBuilder.AppendLine( 'No extensions found.' )
+                            if( -Not [string]::IsNullOrWhiteSpace( $extensionsError ) )
+                            {
+                                [void]$detailsBuilder.AppendLine( "Error retrieving extensions: $extensionsError" )
+                            }
+                            [void]$detailsBuilder.AppendLine( '' )
+                        }
+
+                        [void]$detailsBuilder.AppendLine( 'Applications' )
+                        [void]$detailsBuilder.AppendLine( '------------' )
+                        [array]$galleryApplications = @()
+                        if( $null -ne $vm -and $vm.PSObject.Properties.Match( 'ApplicationProfile' ).Count -gt 0 -and $null -ne $vm.ApplicationProfile )
+                        {
+                            if( $vm.ApplicationProfile.PSObject.Properties.Match( 'GalleryApplications' ).Count -gt 0 -and $null -ne $vm.ApplicationProfile.GalleryApplications )
+                            {
+                                $galleryApplications = @( $vm.ApplicationProfile.GalleryApplications )
+                            }
+                        }
+
+                        if( $galleryApplications.Count -gt 0 )
+                        {
+                            ForEach( $application in $galleryApplications )
+                            {
+                                [void]$detailsBuilder.AppendLine( "Package Reference: $($application.PackageReferenceId)" )
+                                if( $application.PSObject.Properties.Match( 'ConfigurationReference' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $application.ConfigurationReference ) )
+                                {
+                                    [void]$detailsBuilder.AppendLine( "Configuration Reference: $($application.ConfigurationReference)" )
+                                }
+                                if( $application.PSObject.Properties.Match( 'Order' ).Count -gt 0 )
+                                {
+                                    [void]$detailsBuilder.AppendLine( "Order: $($application.Order)" )
+                                }
+                                if( $application.PSObject.Properties.Match( 'Tag' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $application.Tag ) )
+                                {
+                                    [void]$detailsBuilder.AppendLine( "Tag: $($application.Tag)" )
+                                }
+                                [void]$detailsBuilder.AppendLine( '' )
+                            }
+                        }
+                        else
+                        {
+                            [void]$detailsBuilder.AppendLine( 'No gallery applications assigned.' )
+                        }
+
+                        Show-AzureRunCommandOutputWindow -computerName $selection.Name -scriptText 'Extensions + Applications' -outputText $detailsBuilder.ToString().Trim()
+                    }
+                    catch
+                    {
+                        [void][Windows.MessageBox]::Show( $mainWindow , "Failed to retrieve extensions and applications for $($selection.Name)`n$($_.Exception.Message)" , 'Azure VM Details' , 'Ok' ,'Error' )
+                    }
+                }
+                elseif( $operation -ieq 'Azure_RunOn' )
+                {
+                    try
+                    {
+                        Import-Module -Name Az.Accounts -Verbose:$false
+                        Import-Module -Name Az.Compute -Verbose:$false
+
+                        $currentAzContext = Get-AzContext -ErrorAction Stop
+                        if( $null -eq $currentAzContext )
+                        {
+                            throw 'No active Azure context. Connect to Azure first.'
+                        }
+
+                        [string]$contextPath = Join-Path -Path $env:TEMP -ChildPath ( 'mstsc-sizer-azcontext-{0}.json' -f ([guid]::NewGuid().ToString()) )
+                        Save-AzContext -Path $contextPath -Force -ErrorAction Stop | Out-Null
+                        Write-Verbose -Message "Azure_Run preparing command for VM '$($selection.Name)' in resource group '$($selection.ResourceGroup)'"
+                        Write-Verbose -Message "Azure_Run script text: $azureRunCommandText"
+
+                        try
+                        {
+                            $job = Start-Job -Name "Azure_Run_$($selection.Name)" -ArgumentList $selection.Name, $selection.ResourceGroup, $azureRunCommandText, $contextPath, $currentAzContext.Subscription.Id -ScriptBlock {
+                                Param(
+                                    [string]$vmName,
+                                    [string]$resourceGroupName,
+                                    [string]$scriptToRun,
+                                    [string]$azContextPath,
+                                    [string]$subscriptionId
+                                )
+
+                                Import-Module -Name Az.Accounts -Verbose:$false
+                                Import-Module -Name Az.Compute -Verbose:$false
+                                Import-AzContext -Path $azContextPath -ErrorAction Stop | Out-Null
+                                if( -Not [string]::IsNullOrWhiteSpace( $subscriptionId ) )
+                                {
+                                    Set-AzContext -SubscriptionId $subscriptionId -ErrorAction Stop | Out-Null
+                                }
+
+                                Write-Verbose -Message "Azure_Run job executing on VM '$vmName' in resource group '$resourceGroupName' with script: $scriptToRun" -Verbose
+
+                                $result = Invoke-AzVMRunCommand -ResourceGroupName $resourceGroupName -Name $vmName -CommandId RunPowerShellScript -ScriptString $scriptToRun -ErrorAction Stop
+                                $outputParts = New-Object System.Collections.Generic.List[string]
+
+                                $addOutputPart = {
+                                    Param(
+                                        [string]$text
+                                    )
+
+                                    if( -Not [string]::IsNullOrWhiteSpace( $text ) )
+                                    {
+                                        [void]$outputParts.Add( $text.TrimEnd() )
+                                    }
+                                }
+
+                                $extractStatusMessage = {
+                                    Param(
+                                        $status
+                                    )
+
+                                    $convertValueToText = {
+                                        Param(
+                                            $value
+                                        )
+
+                                        if( $null -eq $value )
+                                        {
+                                            return ''
+                                        }
+
+                                        if( ( $value -is [System.Collections.IEnumerable] ) -and -Not ( $value -is [string] ) )
+                                        {
+                                            return ( @( $value ) | ForEach-Object { if( $null -eq $_ ) { '' } else { [string]$_ } } | Where-Object { -Not [string]::IsNullOrWhiteSpace( $_ ) } ) -join "`r`n"
+                                        }
+
+                                        return [string]$value
+                                    }
+
+                                    if( $null -eq $status )
+                                    {
+                                        return
+                                    }
+
+                                    [string]$messageText = $null
+                                    if( $status.PSObject.Properties.Match( 'Message' ).Count -gt 0 )
+                                    {
+                                        $messageText = & $convertValueToText $status.Message
+                                    }
+                                    elseif( $status.PSObject.Properties.Match( 'Output' ).Count -gt 0 )
+                                    {
+                                        $messageText = & $convertValueToText $status.Output
+                                    }
+
+                                    if( [string]::IsNullOrWhiteSpace( $messageText ) )
+                                    {
+                                        return
+                                    }
+
+                                    try
+                                    {
+                                        $jsonMessage = $messageText | ConvertFrom-Json -ErrorAction Stop
+                                        if( $null -ne $jsonMessage )
+                                        {
+                                            [string]$stdoutText = $null
+                                            if( $jsonMessage.PSObject.Properties.Match( 'stdout' ).Count -gt 0 )
+                                            {
+                                                $stdoutText = & $convertValueToText $jsonMessage.stdout
+                                            }
+                                            if( -Not [string]::IsNullOrWhiteSpace( $stdoutText ) )
+                                            {
+                                                & $addOutputPart ( "[stdout]`r`n$stdoutText" )
+                                            }
+
+                                            [string]$stderrText = $null
+                                            if( $jsonMessage.PSObject.Properties.Match( 'stderr' ).Count -gt 0 )
+                                            {
+                                                $stderrText = & $convertValueToText $jsonMessage.stderr
+                                            }
+                                            if( -Not [string]::IsNullOrWhiteSpace( $stderrText ) )
+                                            {
+                                                & $addOutputPart ( "[stderr]`r`n$stderrText" )
+                                            }
+
+                                            [string]$summaryMessageText = $null
+                                            if( $jsonMessage.PSObject.Properties.Match( 'message' ).Count -gt 0 )
+                                            {
+                                                $summaryMessageText = & $convertValueToText $jsonMessage.message
+                                            }
+                                            if( -Not [string]::IsNullOrWhiteSpace( $summaryMessageText ) )
+                                            {
+                                                & $addOutputPart ( "[message]`r`n$summaryMessageText" )
+                                            }
+                                            return
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        ## not JSON output, use as-is
+                                    }
+
+                                    & $addOutputPart $messageText
+                                }
+
+                                ForEach( $status in @( $result.Value ) )
+                                {
+                                    & $extractStatusMessage $status
+                                }
+                                ForEach( $status in @( $result.Output ) )
+                                {
+                                    & $extractStatusMessage $status
+                                }
+
+                                [string]$resultText = ( $outputParts -join "`r`n`r`n" ).Trim()
+                                if( [string]::IsNullOrWhiteSpace( $resultText ) )
+                                {
+                                    $resultText = ( $result | ConvertTo-Json -Depth 12 )
+                                }
+
+                                [pscustomobject]@{
+                                    Name = $vmName
+                                    OutputText = $resultText
+                                    Result = $result
+                                }
+                            }
+
+                            if( $null -ne $job )
+                            {
+                                $job | Add-Member -NotePropertyName ContextPath -NotePropertyValue $contextPath -Force
+                                $job
+                                continue
+                            }
+                        }
+                        catch
+                        {
+                            if( Test-Path -Path $contextPath )
+                            {
+                                Remove-Item -Path $contextPath -Force -ErrorAction SilentlyContinue
+                            }
+                            throw
+                        }
+                    }
+                    catch
+                    {
+                        Write-Warning -Message "Azure run command failed to start for $($selection.Name) : $_"
+                        [void][Windows.MessageBox]::Show( $mainWindow , "Azure run command failed to start for $($selection.Name)`n$($_.Exception.Message)" , 'Azure Run Command' , 'Ok' ,'Error' )
+                    }
+                }
+                elseif( $operation -imatch '^Azure_.*Session$' )
+                {
+                    try
+                    {
+                        $sessionHost = $null
+                        $sessionHost = Get-AzureAVDSessionHost -selection $selection
+
+                        if( $operation -ieq 'Azure_DrainModeOnSession' -or $operation -ieq 'Azure_DrainModeOffSession' )
+                        {
+                            [bool]$allowNewSession = $operation -ieq 'Azure_DrainModeOffSession'
+                            [string]$payload = (@{ properties = @{ allowNewSession = $allowNewSession } } | ConvertTo-Json -Compress)
+                            $null = Invoke-AzRestMethod -Method PATCH -Path "$($sessionHost.Id)?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
+                            $refreshAzureList = $true
+                            continue
+                        }
+
+
+                        [array]$userSessions = @( Get-AzureAVDUserSessions -sessionHostResourceId $sessionHost.Id )
+                        if( $null -eq $userSessions -or $userSessions.Count -eq 0 )
+                        {
+                            [void][Windows.MessageBox]::Show( $mainWindow , "No active user sessions found on $($selection.Name)" , 'Azure AVD Sessions' , 'Ok' ,'Information' )
+                            continue
+                        }
+                        if( $operation -ieq 'Azure_MessageSession' )
+                        {
+                            if( $null -eq $azureSessionMessage )
+                            {
+                                $azureSessionMessage = Get-AzureAVDSessionMessage
+                                if( $null -eq $azureSessionMessage )
+                                {
+                                    break
+                                }
+                            }
+                        }
+
+                        ForEach( $userSession in $userSessions )
+                        {
+                            if( $operation -ieq 'Azure_DisconnectSession' )
+                            {
+                                $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/disconnect?api-version=$AVDAPIversion" -ErrorAction Stop
+                                $refreshAzureList = $true
+                            }
+                            elseif( $operation -ieq 'Azure_LogoffSession' )
+                            {
+                                $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion" -ErrorAction Stop
+                                $refreshAzureList = $true
+                            }
+                            elseif( $operation -ieq 'Azure_ForceLogoffSession' )
+                            {
+                                $null = Invoke-AzRestMethod -Method DELETE -Path "$($userSession.Id)?api-version=$AVDAPIversion&force=true" -ErrorAction Stop
+                                $refreshAzureList = $true
+                            }
+                            elseif( $operation -ieq 'Azure_MessageSession' )
+                            {
+                                [string]$payload = (@{ messageTitle = $azureSessionMessage.Title ; messageBody = $azureSessionMessage.Body } | ConvertTo-Json -Compress)
+                                $null = Invoke-AzRestMethod -Method POST -Path "$($userSession.Id)/sendMessage?api-version=$AVDAPIversion" -Payload $payload -ErrorAction Stop
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        Write-Warning -Message "Azure AVD session operation failed for $($selection.Name) : $_"
+                        [void][Windows.MessageBox]::Show( $mainWindow , "Azure AVD session operation failed for $($selection.Name)`n$($_.Exception.Message)" , 'Azure AVD Sessions' , 'Ok' ,'Error' )
+                    }
+                }
+                elseif( $operation -ieq 'HyperV_PowerOn' )
+                {
+                    Hyper-V\Start-VM -VMName $selection.Name @hypervParameters @async
+                }
+                elseif( $operation -ieq 'HyperV_Shutdown' )
+                {
+                    Hyper-V\Stop-VM -VMName $selection.Name  @hypervParameters @async
+                }
+                elseif( $operation -ieq 'HyperV_PowerOff' )
+                {
+                    Hyper-V\Stop-VM -VMName $selection.Name -TurnOff @hypervParameters -Force -Confirm:$false @async
+                }
+                elseif( $operation -ieq 'HyperV_Restart' )
+                {
+                    Hyper-V\Restart-VM -VMName $selection.Name  @hypervParameters -Force -Confirm:$false @async
+                }
+                elseif( $operation -ieq 'HyperV_Resume' )
+                {
+                    Hyper-V\Resume-VM -VMName $selection.Name  @hypervParameters -Asjob @async
+                }
+                elseif( $operation -ieq 'HyperV_Suspend' )
+                {
+                    Hyper-V\Suspend-VM -VMName $selection.Name @hypervParameters @async
+                }
+                elseif( $operation -ieq 'HyperV_RevertLatestSnapshot' -or $operation -ieq 'HyperV_DeleteLatestSnapshot')
+                {
+                    $latestCheckPoint = $null
+                    $latestCheckPoint = Get-VMCheckpoint -VMName $selection.Name @hypervParameters | Sort-Object -Property CreationTime -Descending | Select-Object -First 1
+                    if( $null -ne $latestCheckPoint )
+                    {
+                        if( [Windows.MessageBox]::Show( $mainWindow , "$($latestCheckPoint.CreationTime.ToString('g')) : $($latestCheckPoint.Name)",
+                            "$(if( $operation -match 'delete' ) { 'Delete' } else { 'Restore' }) Snapshot on $($selection.Name)" , 'YesNoCancel' ,'Question' ) -ieq 'yes' )
+                        {
+                            ## do not need hypervparameters as cannot user -computername with a snapshot object as that contains the remote details
+                            if( $operation -match 'delete' )
+                            {
+                                Hyper-V\Remove-VMCheckpoint  -VMSnapshot $latestCheckPoint -Confirm:$false -Passthru
+                            }
+                            else
+                            {
+                                Hyper-V\Restore-VMCheckpoint -VMSnapshot $latestCheckPoint -Confirm:$false -Passthr
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Write-Warning -Message "No snapshots found for $($selection.Name)"
+                        ## TODO No snapshots message
+                    }
+                }         
+                elseif( $operation -ieq 'HyperV_TakeSnapshot' )
+                {        
+                    if( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML )
+                    {
+                        $WPFbtnInputTextOk.Add_Click({ 
+                            $_.Handled = $true
+                            $textInputWindow.DialogResult = $true 
+                            $textInputWindow.Close()  })
+                        $textInputWindow.Title = "New Snapshot"
+                        $WPFlblInputTextLabel.Content = "Enter Snapshot Name"
+                        if( $vm -and $vm.State -ieq 'Running' )
+                        {
+                            $response = [Windows.MessageBox]::Show( $mainWindow , "Uptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
+                            if( $response -ieq 'Cancel' )
+                            {
+                                return
+                            }
+                            elseif( $response -ieq 'yes' )
+                            {
+                                Hyper-V\Stop-VM -VM $VM -TurnOff ## synchronous
+                            }
+                        }
+                        if( $textInputWindow.ShowDialog() )
+                        {
+                            [hashtable]$snapshotParameters = @{}
+                            if( $WPFtextboxInputText.Text.Length )
+                            {
+                                $snapshotParameters.Add( 'SnapshotName' , $WPFtextboxInputText.Text.Trim() )
+                            }
+                            
+                            Hyper-V\Checkpoint-VM -VMName $selection.Name -Passthru @hypervParameters @snapshotParameters
+                            $checkpointStatus = $?
+                            $response = [Windows.MessageBox]::Show( $mainWindow , "Snapshot $(if( $checkpointStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name) after restore" , 'YesNo' ,'Question' )
+                            if( $response -ieq 'yes' )
+                            {
+                                Hyper-V\Start-VM -VMName $selection.Name @hypervParameters @async
+                            }
                         }
                     }
                 }
-                else
-                {
-                    Write-Warning -Message "No snapshots found for $($selection.Name)"
-                    ## TODO No snapshots message
-                }
-            }         
-            elseif( $operation -ieq 'HyperV_TakeSnapshot' )
-            {        
-                if( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML )
-                {
-                    $WPFbtnInputTextOk.Add_Click({ 
-                        $_.Handled = $true
-                        $textInputWindow.DialogResult = $true 
-                        $textInputWindow.Close()  })
-                    $textInputWindow.Title = "New Snapshot"
-                    $WPFlblInputTextLabel.Content = "Enter Snapshot Name"
-                    if( $vm -and $vm.State -ieq 'Running' )
+                elseif( $operation -ieq 'HyperV_Rename' )
+                {        
+                    if( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML )
                     {
-                        $response = [Windows.MessageBox]::Show( $mainWindow , "Uptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
+                        $WPFbtnInputTextOk.Add_Click({ 
+                            $_.Handled = $true
+                            $textInputWindow.DialogResult = $true 
+                            $textInputWindow.Close()  })
+                        $textInputWindow.Title = "Rename $($selection.Name)"
+                        $WPFlblInputTextLabel.Content = "Enter New VM Name"
+                        if( $textInputWindow.ShowDialog() )
+                        {
+                            [string]$newname = $WPFtextboxInputText.Text.Trim().Trim('"')
+                            if( [string]::IsNullOrEmpty( $newname ) )
+                            {
+                                Write-Error "New name `"$newname`" too short"
+                            }
+                            else
+                            {
+                                if( $newname -ieq $selection.Name )
+                                {
+                                    Write-Error "New name $newname is the same"
+                                }
+                                elseif( $null -ne ($existingVM = Hyper-V\Get-VM -Name $newname -ErrorAction SilentlyContinue @hypervParameters ) )
+                                {
+                                    Write-Error "VM $newname already exists"
+                                }
+                                else
+                                {
+                                    Hyper-V\Rename-VM -VM $vm -Passthru -NewName $newname
+                                }
+                            }
+                        }
+                    }
+                }
+                elseif( $operation -ieq 'HyperV_ManageSnapshot' )
+                {
+                    Show-SnapShotWindow -vm $selection.Name
+                }
+                elseif( $operation -ieq 'HyperV_Save' )
+                {
+                    Hyper-V\Save-VM -VMName $selection.Name @hypervParameters @async
+                }
+                elseif( $operation -ieq 'HyperV_Delete' -or $operation -ieq 'HyperV_DeleteIncludingDisks' )
+                {
+                    $disks = $null
+                    if( $operation -ieq 'HyperV_DeleteIncludingDisks' )
+                    {
+                        $disks = @( Hyper-V\Get-VMHardDiskDrive -VMName $selection.Name @hypervParameters )
+                        Write-Verbose -Message "Got $($disks.Count) disks for VM $($disks.VMName)"
+                    }
+                    $removal = $null
+                    $removal = Hyper-V\Remove-VM -VMName $selection.Name -Passthru -Force -Confirm:$false @hypervParameters
+                    if( $? -and $null -ne $removal )
+                    {
+                        ForEach( $disk in $disks )
+                        {
+                            Write-Verbose -Message "Deleting disk $($disk.Path)"
+                            ## Could be remote so we use WMI with the CIM session in the disks object
+                            $file = $null
+                            ## needs backslashes escaping
+                            $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $disk.CimSession
+                            if( $null -ne $file )
+                            {
+                                Remove-CimInstance -InputObject $file -CimSession $disk.CimSession -Confirm:$false
+                            }
+                            else
+                            {
+                                Write-Warning -Message "Failed to get file for disk $($disk.Path)"
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Write-Verbose -Message "Not deleting disks for $($selection.Name) as deleting VM errored"
+                    }
+                }
+                elseif( $operation -ieq 'HyperV_Detail' )
+                {
+                    $details = $null
+                    $details = Hyper-V\Get-VM -VMName $selection.Name @hypervParameters
+                    if( $null -ne $details )
+                    {
+                        [array]$hardDrives = @( Get-VMHardDiskDrive -VM $details )
+                        [string[]]$diskDetails = @( ForEach( $disk in $hardDrives )
+                        {
+                            [string]$size = ''
+                            $file = $null
+                            $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $disk.CimSession
+                            if( $null -ne $file )
+                            {
+                                $size = "$([math]::Round( $file.filesize / 1GB , 1 ))"
+                            }
+                            "$($disk.Path) ($($size) GB)"
+                        })
+                        [array]$snapshots = @( Get-VMSnapshot -VM $details | Sort-Object -Property CreationTime )
+                        [array]$NICs = @( Get-VMNetworkAdapter -VM $details )
+                        $form = New-Object System.Windows.Forms.Form
+                        $form.Text = $selection.Name
+                        $form.Size = New-Object System.Drawing.Size(800, 400)
+                        $form.StartPosition = "CenterScreen"
+
+                        $listView = New-Object System.Windows.Forms.ListView
+                        $listView.View = 'Details'
+                        $listView.FullRowSelect = $true
+                        $listView.GridLines = $true
+                        $listView.Dock = 'Fill'
+                        $listView.Columns.Add("Setting", 180)
+                        $listView.Columns.Add("Value", 600 )
+
+                        $data = @(
+                            @{ Setting = "Notes"; Value = $details.Notes }
+                            @{ Setting = "State"; Value = $details.State.ToString() }
+                            @{ Setting = "vCPU"; Value = $details.ProcessorCount }
+                            @{ Setting = "Resource Metering Enabled"; Value = $details.ResourceMeteringEnabled.ToString() }
+                            @{ Setting = "Uptime"; Value = $details.Uptime.ToString() }
+                            @{ Setting = "Version"; Value = $details.Version.ToString() }
+                            @{ Setting = "Memory Startup MB"; Value = $details.MemoryStartup / 1MB }
+                            @{ Setting = "Memory Assigned MB"; Value = $details.MemoryAssigned / 1MB }
+                            @{ Setting = "Memory Minimum MB"; Value = $details.MemoryMinimum / 1MB }
+                            @{ Setting = "Memory Maximum MB"; Value = $details.MemoryMaximum / 1MB }
+                            @{ Setting = "Dynamic Memory Enabled"; Value = $details.DynamicMemoryEnabled.ToString() }
+                            @{ Setting = "Hard Drives"; Value = $diskDetails -join "`n" }
+                            @{ Setting = "NICs"; Value = $NICs.Count }                        
+                            @{ Setting = "IP Addresses"; Value = ( $NICs | Select-Object -ExpandProperty IPAddresses -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
+                            @{ Setting = "DNS Resolved"; Value = ( Resolve-DnsName -Name $details.Name -Type A | Select-Object -ExpandProperty IPAddress -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
+                            @{ Setting = "Snapshots"; Value = $snapshots.Count }
+                            @{ Setting = "Created"; Value = $details.CreationTime.ToString('G') }
+                            @{ Setting = "Oldest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[0].CreationTime.ToString('G')) ($($snapshots[0].Name) ($($snapshots[0].Notes)))" })}
+                            @{ Setting = "Latest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[-1].CreationTime.ToString('G')) ($($snapshots[-1].Name) ($($snapshots[-1].Notes)))" })}  
+                        )
+
+                        foreach ($item in $data)
+                        {
+                        try {
+                            $listItem = New-Object System.Windows.Forms.ListViewItem($item.Setting)
+                            $listItem.SubItems.Add($item.Value)
+                            $null = $listView.Items.Add($listItem)
+                        } catch {
+                            Write-Warning "Exception adding $($item.value) to list view: $_"
+                        }
+                        }
+
+                        $form.Controls.Add($listView)
+                        $form.Add_Shown({ $form.Activate() })
+                        [void]$form.ShowDialog()
+                    }
+                    else
+                    {
+                        ## TODO error dialogue
+                    }
+                }
+                elseif( $Operation -ieq 'HyperV_EnableNestedVirtualisation' )
+                {
+                    if( ( $vm = Hyper-V\Get-VM -VMName $selection.Name @hypervParameters) -and $vm.State -ieq 'Running' )
+                    {
+                        $response = [Windows.MessageBox]::Show( $mainWindow , "VM cannot be running`nUptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
                         if( $response -ieq 'Cancel' )
                         {
                             return
                         }
                         elseif( $response -ieq 'yes' )
                         {
-                            Hyper-V\Stop-VM -VM $VM -TurnOff ## synchronous
+                            Hyper-V\Stop-VM -VM $VM -TurnOff ## syncrhonous
                         }
                     }
-                    if( $textInputWindow.ShowDialog() )
+                    Set-VMProcessor -VM $vm -ExposeVirtualizationExtensions $true
+                    $configChangeStatus = $?
+                    $response = [Windows.MessageBox]::Show( $mainWindow , "Change $(if( $configChangeStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name)" , 'YesNo' ,'Question' )
+                    if( $response -ieq 'yes' )
                     {
-                        [hashtable]$snapshotParameters = @{}
-                        if( $WPFtextboxInputText.Text.Length )
-                        {
-                            $snapshotParameters.Add( 'SnapshotName' , $WPFtextboxInputText.Text.Trim() )
-                        }
-                        
-                        Hyper-V\Checkpoint-VM -VMName $selection.Name -Passthru @hypervParameters @snapshotParameters
-                        $checkpointStatus = $?
-                        $response = [Windows.MessageBox]::Show( $mainWindow , "Snapshot $(if( $checkpointStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name) after restore" , 'YesNo' ,'Question' )
-                        if( $response -ieq 'yes' )
-                        {
-                            Hyper-V\Start-VM -VMName $selection.Name @hypervParameters @async
-                        }
+                        Hyper-V\Start-VM -VM $VM @hypervParameters @async
                     }
                 }
-            }
-            elseif( $operation -ieq 'HyperV_Rename' )
-            {        
-                if( $textInputWindow = New-WPFWindow -inputXAML $textInputXAML )
+                elseif( $operation -ieq 'HyperV_EnableResourceMetering' )
                 {
-                    $WPFbtnInputTextOk.Add_Click({ 
-                        $_.Handled = $true
-                        $textInputWindow.DialogResult = $true 
-                        $textInputWindow.Close()  })
-                    $textInputWindow.Title = "Rename $($selection.Name)"
-                    $WPFlblInputTextLabel.Content = "Enter New VM Name"
-                    if( $textInputWindow.ShowDialog() )
+                    Hyper-V\Enable-VMResourceMetering -VMName $selection.Name @hypervParameters
+                }
+                elseif( $operation -ieq 'HyperV_DisableResourceMetering' )
+                {
+                    Hyper-V\Disable-VMResourceMetering -VMName $selection.Name @hypervParameters
+                }
+                elseif( $operation -ieq 'HyperV_DisConnectNIC' )
+                {
+                    ## TODO what if more than one NIC?
+                    Hyper-V\Disconnect-VMNetworkAdapter -VMName $selection.Name @hypervParameters -Passthru
+                }
+                elseif( $operation -imatch 'HyperV_ConnectNIC*' )
+                {
+                    [string]$switchType = $Operation -replace '^HyperV_ConnectNIC'
+                    ## TODO need to get virtual switch names and if more than one prompt for the required one
+                    [array]$switches = @( Hyper-V\Get-VMSwitch -SwitchType $switchType @hypervParameters )
+                    if( $switches.Count -gt 1 )
                     {
-                        [string]$newname = $WPFtextboxInputText.Text.Trim().Trim('"')
-                        if( [string]::IsNullOrEmpty( $newname ) )
-                        {
-                            Write-Error "New name `"$newname`" too short"
-                        }
-                        else
-                        {
-                            if( $newname -ieq $selection.Name )
-                            {
-                                Write-Error "New name $newname is the same"
-                            }
-                            elseif( $null -ne ($existingVM = Hyper-V\Get-VM -Name $newname -ErrorAction SilentlyContinue @hypervParameters ) )
-                            {
-                                Write-Error "VM $newname already exists"
-                            }
-                            else
-                            {
-                                Hyper-V\Rename-VM -VM $vm -Passthru -NewName $newname
-                            }
-                        }
+                        Write-Warning "VM $($selecion.Name) has $($switches.Count) NICs which isn't yet implemented sorry"
                     }
+                    Hyper-V\Connect-VMNetworkAdapter -VMName $selection.Name -SwitchName $switches[ 0 ].Name @hypervParameters @async
                 }
-            }
-            elseif( $operation -ieq 'HyperV_ManageSnapshot' )
-            {
-                Show-SnapShotWindow -vm $selection.Name
-            }
-            elseif( $operation -ieq 'HyperV_Save' )
-            {
-                Hyper-V\Save-VM -VMName $selection.Name @hypervParameters @async
-            }
-            elseif( $operation -ieq 'HyperV_Delete' -or $operation -ieq 'HyperV_DeleteIncludingDisks' )
-            {
-                $disks = $null
-                if( $operation -ieq 'HyperV_DeleteIncludingDisks' )
+                elseif( $operation -ieq 'HyperV_RunOn' )
                 {
-                    $disks = @( Hyper-V\Get-VMHardDiskDrive -VMName $selection.Name @hypervParameters )
-                    Write-Verbose -Message "Got $($disks.Count) disks for VM $($disks.VMName)"
-                }
-                $removal = $null
-                $removal = Hyper-V\Remove-VM -VMName $selection.Name -Passthru -Force -Confirm:$false @hypervParameters
-                if( $? -and $null -ne $removal )
-                {
-                    ForEach( $disk in $disks )
+                    ## TODO bring output processing code for this from VMware GUI
+                    if( -Not [string]::IsNullOrEmpty( $WPFtextBoxHyperVHost.Text ) -and $WPFtextBoxHyperVHost -ine 'localhost' )
                     {
-                        Write-Verbose -Message "Deleting disk $($disk.Path)"
-                        ## Could be remote so we use WMI with the CIM session in the disks object
-                        $file = $null
-                        ## needs backslashes escaping
-                        $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $disk.CimSession
-                        if( $null -ne $file )
-                        {
-                            Remove-CimInstance -InputObject $file -CimSession $disk.CimSession -Confirm:$false
-                        }
-                        else
-                        {
-                            Write-Warning -Message "Failed to get file for disk $($disk.Path)"
-                        }
-                    }
-                }
-                else
-                {
-                    Write-Verbose -Message "Not deleting disks for $($selection.Name) as deleting VM errored"
-                }
-            }
-            elseif( $operation -ieq 'HyperV_Detail' )
-            {
-                $details = $null
-                $details = Hyper-V\Get-VM -VMName $selection.Name @hypervParameters
-                if( $null -ne $details )
-                {
-                    [array]$hardDrives = @( Get-VMHardDiskDrive -VM $details )
-                    [string[]]$diskDetails = @( ForEach( $disk in $hardDrives )
-                    {
-                        [string]$size = ''
-                        $file = $null
-                        $file = Get-CimInstance -ClassName cim_datafile -Filter "Name = '$($disk.Path -replace '\\' , '\\')'" -CimSession $disk.CimSession
-                        if( $null -ne $file )
-                        {
-                            $size = "$([math]::Round( $file.filesize / 1GB , 1 ))"
-                        }
-                        "$($disk.Path) ($($size) GB)"
-                    })
-                    [array]$snapshots = @( Get-VMSnapshot -VM $details | Sort-Object -Property CreationTime )
-                    [array]$NICs = @( Get-VMNetworkAdapter -VM $details )
-                    $form = New-Object System.Windows.Forms.Form
-                    $form.Text = $selection.Name
-                    $form.Size = New-Object System.Drawing.Size(800, 400)
-                    $form.StartPosition = "CenterScreen"
-
-                    $listView = New-Object System.Windows.Forms.ListView
-                    $listView.View = 'Details'
-                    $listView.FullRowSelect = $true
-                    $listView.GridLines = $true
-                    $listView.Dock = 'Fill'
-                    $listView.Columns.Add("Setting", 180)
-                    $listView.Columns.Add("Value", 600 )
-
-                    $data = @(
-                        @{ Setting = "Notes"; Value = $details.Notes }
-                        @{ Setting = "State"; Value = $details.State.ToString() }
-                        @{ Setting = "vCPU"; Value = $details.ProcessorCount }
-                        @{ Setting = "Resource Metering Enabled"; Value = $details.ResourceMeteringEnabled.ToString() }
-                        @{ Setting = "Uptime"; Value = $details.Uptime.ToString() }
-                        @{ Setting = "Version"; Value = $details.Version.ToString() }
-                        @{ Setting = "Memory Startup MB"; Value = $details.MemoryStartup / 1MB }
-                        @{ Setting = "Memory Assigned MB"; Value = $details.MemoryAssigned / 1MB }
-                        @{ Setting = "Memory Minimum MB"; Value = $details.MemoryMinimum / 1MB }
-                        @{ Setting = "Memory Maximum MB"; Value = $details.MemoryMaximum / 1MB }
-                        @{ Setting = "Dynamic Memory Enabled"; Value = $details.DynamicMemoryEnabled.ToString() }
-                        @{ Setting = "Hard Drives"; Value = $diskDetails -join "`n" }
-                        @{ Setting = "NICs"; Value = $NICs.Count }                        
-                        @{ Setting = "IP Addresses"; Value = ( $NICs | Select-Object -ExpandProperty IPAddresses -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
-                        @{ Setting = "DNS Resolved"; Value = ( Resolve-DnsName -Name $details.Name -Type A | Select-Object -ExpandProperty IPAddress -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch ':' } ) -join ' , ' }
-                        @{ Setting = "Snapshots"; Value = $snapshots.Count }
-                        @{ Setting = "Created"; Value = $details.CreationTime.ToString('G') }
-                        @{ Setting = "Oldest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[0].CreationTime.ToString('G')) ($($snapshots[0].Name) ($($snapshots[0].Notes)))" })}
-                        @{ Setting = "Latest Snapshot"; Value = $(if( $null -ne $snapshots -and $snapshots.Count -gt 0 ) { "$($snapshots[-1].CreationTime.ToString('G')) ($($snapshots[-1].Name) ($($snapshots[-1].Notes)))" })}  
-                    )
-
-                    foreach ($item in $data)
-                    {
-                    try {
-                        $listItem = New-Object System.Windows.Forms.ListViewItem($item.Setting)
-                        $listItem.SubItems.Add($item.Value)
-                        $null = $listView.Items.Add($listItem)
-                    } catch {
-                        Write-Warning "Exception adding $($item.value) to list view: $_"
-                    }
-                    }
-
-                    $form.Controls.Add($listView)
-                    $form.Add_Shown({ $form.Activate() })
-                    [void]$form.ShowDialog()
-                }
-                else
-                {
-                    ## TODO error dialogue
-                }
-            }
-            elseif( $Operation -ieq 'HyperV_EnableNestedVirtualisation' )
-            {
-                if( ( $vm = Hyper-V\Get-VM -VMName $selection.Name @hypervParameters) -and $vm.State -ieq 'Running' )
-                {
-                    $response = [Windows.MessageBox]::Show( $mainWindow , "VM cannot be running`nUptime $($vm.Uptime)", "Shutdown $($vm.Name) first" , 'YesNoCancel' ,'Question' )
-                    if( $response -ieq 'Cancel' )
-                    {
-                        return
-                    }
-                    elseif( $response -ieq 'yes' )
-                    {
-                        Hyper-V\Stop-VM -VM $VM -TurnOff ## syncrhonous
-                    }
-                }
-                Set-VMProcessor -VM $vm -ExposeVirtualizationExtensions $true
-                $configChangeStatus = $?
-                $response = [Windows.MessageBox]::Show( $mainWindow , "Change $(if( $configChangeStatus ) { 'succeeded' } else { 'failed' })", "Start $($vm.Name)" , 'YesNo' ,'Question' )
-                if( $response -ieq 'yes' )
-                {
-                    Hyper-V\Start-VM -VM $VM @hypervParameters @async
-                }
-            }
-            elseif( $operation -ieq 'HyperV_EnableResourceMetering' )
-            {
-                Hyper-V\Enable-VMResourceMetering -VMName $selection.Name @hypervParameters
-            }
-            elseif( $operation -ieq 'HyperV_DisableResourceMetering' )
-            {
-                Hyper-V\Disable-VMResourceMetering -VMName $selection.Name @hypervParameters
-            }
-            elseif( $operation -ieq 'HyperV_DisConnectNIC' )
-            {
-                ## TODO what if more than one NIC?
-                Hyper-V\Disconnect-VMNetworkAdapter -VMName $selection.Name @hypervParameters -Passthru
-            }
-            elseif( $operation -imatch 'HyperV_ConnectNIC*' )
-            {
-                [string]$switchType = $Operation -replace '^HyperV_ConnectNIC'
-                ## TODO need to get virtual switch names and if more than one prompt for the required one
-                [array]$switches = @( Hyper-V\Get-VMSwitch -SwitchType $switchType @hypervParameters )
-                if( $switches.Count -gt 1 )
-                {
-                    Write-Warning "VM $($selecion.Name) has $($switches.Count) NICs which isn't yet implemented sorry"
-                }
-                Hyper-V\Connect-VMNetworkAdapter -VMName $selection.Name -SwitchName $switches[ 0 ].Name @hypervParameters @async
-            }
-            elseif( $operation -ieq 'HyperV_RunOn' )
-            {
-                ## TODO bring output processing code for this from VMware GUI
-                if( -Not [string]::IsNullOrEmpty( $WPFtextBoxHyperVHost.Text ) -and $WPFtextBoxHyperVHost -ine 'localhost' )
-                {
-                    if( $null -eq $script:remoteSession )
-                    {
-                        $remoteError = $null
-                        $script:remoteSession = New-PSSession -ComputerName $WPFtextBoxHyperVHost.Text -ErrorVariable remoteError
                         if( $null -eq $script:remoteSession )
                         {
-                            $null = [Windows.MessageBox]::Show( $mainWindow , "Failed to remote to $($WPFtextBoxHyperVHost.Text)`n$remoteError" , 'Ok' ,'Error' )
+                            $remoteError = $null
+                            $script:remoteSession = New-PSSession -ComputerName $WPFtextBoxHyperVHost.Text -ErrorVariable remoteError
+                            if( $null -eq $script:remoteSession )
+                            {
+                                $null = [Windows.MessageBox]::Show( $mainWindow , "Failed to remote to $($WPFtextBoxHyperVHost.Text)`n$remoteError" , 'Ok' ,'Error' )
+                                return
+                            }
+                        }
+                    }
+                    if( $null -eq $script:credentials )
+                    {
+                        $script:credentials = Get-Credential -Message "Credentials for running in VM"
+                        if( $null -eq $script:credentials )
+                        {
                             return
                         }
                     }
-                }
-                if( $null -eq $script:credentials )
-                {
-                    $script:credentials = Get-Credential -Message "Credentials for running in VM"
-                    if( $null -eq $script:credentials )
+                    ##TODO  get command and parameters
+                    $commandError = $null
+                    [string]$vmName = $selection.Name
+                    [scriptblock]$commandToRun = { Invoke-Command -VMName $using:vmname -Credential $using:credentials -ScriptBlock { hostname.exe }}
+                    [hashtable]$remoteParameters = @{}
+                    if( $null -ne $script:remoteSession )
                     {
-                        return
+                        $remoteParameters.Add( 'Session' , $script:remoteSession )
+                    }
+                    $job = Invoke-Command @remoteParameters -ScriptBlock $commandToRun -ErrorVariable commandError ## -AsJob
+                    $status = $?
+                    
+                    ## TODO spawn commands async and then gather results later
+
+                    ## need to figure how we detect credentials didn't work so we clear them so get prompted again
+                }
+                else
+                {
+                    Write-Warning -Message "Unimplemented operation $Operation"
+                }
+                $clipboardParameters[ 'Append' ] = $true
+            })
+
+            if( $operation -ieq 'Azure_RunOn' )
+            {
+                [array]$azureRunJobs = @( $jobs | Where-Object { $null -ne $_ } )
+                if( $azureRunJobs.Count -gt 0 )
+                {
+                    try
+                    {
+                        [int]$effectiveAzureRunJobTimeoutSeconds = $azureRunJobTimeoutSeconds
+                        [hashtable]$jobStartTimes = @{}
+                        [System.Collections.ArrayList]$pendingAzureRunJobs = [System.Collections.ArrayList]::new()
+                        ForEach( $job in $azureRunJobs )
+                        {
+                            $null = $pendingAzureRunJobs.Add( $job )
+                            $jobStartTimes[ $job.Id ] = Get-Date
+                        }
+
+                        while( $pendingAzureRunJobs.Count -gt 0 )
+                        {
+                            $completedJob = Wait-Job -Job @( $pendingAzureRunJobs ) -Any -Timeout 2
+                            if( $null -ne $completedJob )
+                            {
+                                ForEach( $job in @( $completedJob ) )
+                                {
+                                    try
+                                    {
+                                        [array]$jobErrors = @()
+                                        [array]$receivedOutput = @( Receive-Job -Job $job -Keep -ErrorVariable +jobErrors )
+                                        $jobResult = $receivedOutput | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties.Match( 'Result' ).Count -gt 0 } | Select-Object -First 1
+
+                                        [string]$vmName = $job.Name -replace '^Azure_Run_' , ''
+                                        if( $null -ne $jobResult -and $jobResult.PSObject.Properties.Match( 'Name' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $jobResult.Name ) )
+                                        {
+                                            $vmName = $jobResult.Name
+                                        }
+
+                                        [string]$outputText = $null
+                                        if( $jobErrors.Count -gt 0 )
+                                        {
+                                            $outputText = ( $jobErrors | ForEach-Object { $_.ToString() } ) -join "`r`n"
+                                        }
+                                        elseif( $null -ne $jobResult )
+                                        {
+                                            if( $jobResult.PSObject.Properties.Match( 'OutputText' ).Count -gt 0 -and -Not [string]::IsNullOrWhiteSpace( $jobResult.OutputText ) )
+                                            {
+                                                $outputText = [string]$jobResult.OutputText
+                                            }
+                                            else
+                                            {
+                                                $outputText = Convert-AzureRunCommandResultToText -runCommandResult $jobResult.Result
+                                            }
+                                        }
+                                        else
+                                        {
+                                            $outputText = 'No output was returned by the Azure run command job.'
+                                        }
+
+                                        Show-AzureRunCommandOutputWindow -computerName $vmName -scriptText $azureRunCommandText -outputText $outputText
+                                    }
+                                    catch
+                                    {
+                                        [void][Windows.MessageBox]::Show( $mainWindow , "Azure run command failed for $($job.Name -replace '^Azure_Run_' , '')`n$($_.Exception.Message)" , 'Azure Run Command' , 'Ok' ,'Error' )
+                                    }
+                                    finally
+                                    {
+                                        if( $job.PSObject.Properties.Match( 'ContextPath' ).Count -gt 0 -and ( Test-Path -Path $job.ContextPath ) )
+                                        {
+                                            Remove-Item -Path $job.ContextPath -Force -ErrorAction SilentlyContinue
+                                        }
+                                        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                                        [void]$pendingAzureRunJobs.Remove( $job )
+                                    }
+                                }
+                            }
+
+                            [datetime]$now = Get-Date
+                            ForEach( $pendingJob in @( $pendingAzureRunJobs ) )
+                            {
+                                [timespan]$elapsed = $now - $jobStartTimes[ $pendingJob.Id ]
+                                if( $elapsed.TotalSeconds -ge $effectiveAzureRunJobTimeoutSeconds )
+                                {
+                                    try
+                                    {
+                                        Stop-Job -Job $pendingJob -ErrorAction SilentlyContinue | Out-Null
+                                        [void][Windows.MessageBox]::Show( $mainWindow , "Azure run command timed out for $($pendingJob.Name -replace '^Azure_Run_' , '') after $effectiveAzureRunJobTimeoutSeconds seconds." , 'Azure Run Command' , 'Ok' ,'Error' )
+                                    }
+                                    finally
+                                    {
+                                        if( $pendingJob.PSObject.Properties.Match( 'ContextPath' ).Count -gt 0 -and ( Test-Path -Path $pendingJob.ContextPath ) )
+                                        {
+                                            Remove-Item -Path $pendingJob.ContextPath -Force -ErrorAction SilentlyContinue
+                                        }
+                                        Remove-Job -Job $pendingJob -Force -ErrorAction SilentlyContinue
+                                        [void]$pendingAzureRunJobs.Remove( $pendingJob )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        Get-Job | Where-Object { $_.Name -like 'Azure_Run_*' } | Remove-Job -Force -ErrorAction SilentlyContinue
                     }
                 }
-                ##TODO  get command and parameters
-                $commandError = $null
-                [string]$vmName = $selection.Name
-                [scriptblock]$commandToRun = { Invoke-Command -VMName $using:vmname -Credential $using:credentials -ScriptBlock { hostname.exe }}
-                [hashtable]$remoteParameters = @{}
-                if( $null -ne $script:remoteSession )
-                {
-                    $remoteParameters.Add( 'Session' , $script:remoteSession )
-                }
-                $job = Invoke-Command @remoteParameters -ScriptBlock $commandToRun -ErrorVariable commandError ## -AsJob
-                $status = $?
-                
-                ## TODO spawn commands async and then gather results later
 
-                ## need to figure how we detect credentials didn't work so we clear them so get prompted again
+                return
             }
-            else
+
+            if( $null -ne $jobs -and $jobs.count -gt 0 )
             {
-                Write-Warning -Message "Unimplemented operation $Operation"
+                $jobs | Write-Verbose
             }
-            $clipboardParameters[ 'Append' ] = $true
-        })
-        if( $null -ne $jobs -and $jobs.count -gt 0 )
-        {
-            $jobs | Write-Verbose
+            if( $refreshAzureList -and $GUIobject -eq $WPFlistViewAzureVMs )
+            {
+                Add-AzureVMsToListView -filter '' -regex $false -all $WPFcheckBoxAzureAllVMs.IsChecked
+            }
         }
-        if( $refreshAzureList -and $GUIobject -eq $WPFlistViewAzureVMs )
+        catch
         {
-            Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+            Write-Error "$_" ## nothing here should be fatal
+        }
+        finally
+        {
+            [System.Windows.Input.Mouse]::OverrideCursor = $null
+            $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty) 
         }
     }
     else
@@ -4704,9 +5601,9 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
 
         $WPFbuttonAzureApplyFilter.Add_Click({
             $_.Handled = $true
-            Write-Verbose "Azure Apply Filter clicked"
+            Write-Verbose "Azure Refresh clicked"
             $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
-            Add-AzureVMsToListView -filter $wpfTextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked -all $WPFcheckBoxAzureAllVMs.IsChecked
+            Add-AzureVMsToListView -filter '' -regex $false -all $WPFcheckBoxAzureAllVMs.IsChecked
             $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty) 
         })
 
@@ -4741,16 +5638,25 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         
         $WPFbuttonAzureConnect.Add_Click({
             $_.Handled = $true
-            Write-Verbose "Azure Connect clicked"
-            $connection = $null
-            $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
-            Import-Module -Name Az.Accounts -Verbose:$false
-            $connection = Connect-AzAccount
-            if( $null -ne $connection )
+            Write-Verbose "Azure Authenticate clicked"
+            try
             {
-                Select-AzureSubscription
+                $connection = $null
+                $mainWindow.Cursor = [System.Windows.Input.Cursors]::Wait
+                $connection = Connect-AzureAccountWithTimeout -timeoutSeconds $azureAuthenticateTimeoutSeconds
+                if( $null -ne $connection )
+                {
+                    Select-AzureSubscription
+                }
             }
-            $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty) 
+            catch
+            {
+                [void][Windows.MessageBox]::Show( $mainWindow , "Azure authentication failed`n$($_.Exception.Message)" , 'Azure Authentication' , 'Ok' ,'Error' )
+            }
+            finally
+            {
+                $mainWindow.ClearValue([System.Windows.FrameworkElement]::CursorProperty)
+            }
         })
 
         $WPFbuttonAzureSubscription.Add_Click({
@@ -4784,18 +5690,20 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         $WPFbuttonAzureClearFilter.Add_Click({
             $_.Handled = $true
             Write-Verbose "Azure Clear Filter clicked"
-            $WPFtextBoxAzureFilter.Text = ''
             $WPFcheckBoxAzureAllVMs.IsChecked = $false
             $script:azureColumnFilters.Clear()
             ##$WPFcheckBoxAzureAVD.IsChecked = $false
-            Add-AzureVMsToListView -filter $WPFtextBoxAzureFilter.Text -regex $WPFcheckBoxAzureRegEx.IsChecked
+            Add-AzureVMsToListView -filter '' -regex $false -all $WPFcheckBoxAzureAllVMs.IsChecked
         })
         $WPFcheckBoxAzureAVD.IsChecked = $avd
 
         $WPFAzurePowerOnContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_PowerOn' })
         $WPFAzurePowerOffContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_PowerOff' })
         $WPFAzureShutdownContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_ShutDown' })
+        $WPFAzureHibernateContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_Hibernate' })
         $WPFAzureRestartContextMenu.Add_Click(  { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_Restart' })
+        $WPFAzureRunContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_RunOn' })
+        $WPFAzureExtensionsApplicationsContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DetailExtensionsApplications' })
         $WPFAzureDetailSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DetailSession' })
         $WPFAzureMessageSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_MessageSession' })
         $WPFAzureDisconnectSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DisconnectSession' })
@@ -4803,6 +5711,7 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
         $WPFAzureForceLogoffSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_ForceLogoffSession' })
         $WPFAzureDrainModeOnSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DrainModeOnSession' })
         $WPFAzureDrainModeOffSessionContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_DrainModeOffSession' })
+        $WPFAzureOpenInPortalContextMenu.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'Azure_OpenInPortal' })
         $WPFAzureNameToClipboard.Add_Click( { Process-Action -GUIobject $WPFlistViewAzureVMs -Operation 'NameToClipboard' })
         
         $WPFdatagridDisplays.add_MouseDoubleClick({
@@ -4877,6 +5786,11 @@ else ## if not passed displayNumber or displaymanufacturer , display a GUI with 
             if( $_.Source -and $_.Source.WindowState -ieq 'Minimized' )
             {
                 $_.Source.WindowState = 'Normal'
+            }
+
+            if( $avd -and $null -ne $WPFtabControl -and $null -ne $WPFtabAzure )
+            {
+                $WPFtabControl.SelectedItem = $WPFtabAzure
             }
         })
         
@@ -4991,8 +5905,8 @@ New-RemoteSession -rethrow
 # SIG # Begin signature block
 # MIIkkQYJKoZIhvcNAQcCoIIkgjCCJH4CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUYEuunALWmM1oEmZ1mcUNnbVN
-# tbCggh9gMIIFfTCCA2WgAwIBAgIQAdazdTZfIM2RHdcv5fmTZDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUaPS9KrIAbBJHaVd6mlpP1oPp
+# hMeggh9gMIIFfTCCA2WgAwIBAgIQAdazdTZfIM2RHdcv5fmTZDANBgkqhkiG9w0B
 # AQsFADBaMQswCQYDVQQGEwJMVjEZMBcGA1UEChMQRW5WZXJzIEdyb3VwIFNJQTEw
 # MC4GA1UEAxMnR29HZXRTU0wgRzQgQ1MgUlNBNDA5NiBTSEEyNTYgMjAyMiBDQS0x
 # MB4XDTI1MDcyMTAwMDAwMFoXDTI2MDcyMDIzNTk1OVowcTELMAkGA1UEBhMCR0Ix
@@ -5164,25 +6078,25 @@ New-RemoteSession -rethrow
 # IEc0IENTIFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0EtMQIQAdazdTZfIM2RHdcv5fmT
 # ZDAJBgUrDgMCGgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG
 # 9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIB
-# FTAjBgkqhkiG9w0BCQQxFgQUDo5bg44ErEKM/+UgkGLTTVVHoYowCwYHKoZIzj0C
-# AQUABGYwZAIwKE9RpGplZgcz9byYusdaVLaBghlIRheEog+YPkHg6tEXKiXAB7Xy
-# 5Grod2Vn42UcAjBICRAGWwBs7JeEUY4pYZ4/LSVbWp6QVngBxRffiNO+OXFCSkOM
-# 3KtffS8O69leZZOhggMmMIIDIgYJKoZIhvcNAQkGMYIDEzCCAw8CAQEwfTBpMQsw
+# FTAjBgkqhkiG9w0BCQQxFgQUo93PlwvTTYpKWfmknDfP73b78GgwCwYHKoZIzj0C
+# AQUABGYwZAIwC2WAzlO2BXuWrvxhwu69d6qYjeppMNTs9UFf1zpiN+JU71SjXvk0
+# +3vZX3RoPSpfAjAzcYBtIz4OKBoYXvOQc8kRbWrjld6fWV0FYJDOIge88C3k3WL7
+# mRlijj1/FpWllOGhggMmMIIDIgYJKoZIhvcNAQkGMYIDEzCCAw8CAQEwfTBpMQsw
 # CQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERp
 # Z2lDZXJ0IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIw
 # MjUgQ0ExAhAKgO8YS43xBYLRxHanlXRoMA0GCWCGSAFlAwQCAQUAoGkwGAYJKoZI
-# hvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjYwNjI1MTY1ODA1
-# WjAvBgkqhkiG9w0BCQQxIgQgN7OuV/65tVL+V3AaWqtrwo2yuV0RlGuomth3tMGy
-# TK0wDQYJKoZIhvcNAQEBBQAEggIAVjpNaDgk0o1IVfZiokA7gXcOAyAhUNAxmcce
-# nsrIXVhFYygcTYqv58hHDWiyr9ok+BVlthclwXwY9qk+ZhVrq3IpMxxGRgU1A8Bv
-# +PoVH6AsckWa4R7SMZP2xBe5rB52CzH2GvdFzAZNou5bsydGfz6/IGWVq8fgeQTk
-# T1hiL3to8OcMMZniypToF4Umx8KaTcYXbdJVqIi652zXF4X+N2b713djDCE4CNVV
-# acHTjvdlTq799nUkS/x75X2y9+g9MXQA7j6TDmf9qX5Kbw3ZVBqbK+IeA3FuwEWZ
-# 4mQbOybpEyioCQAZ6gOZAO73Q7EKI85RoQsbKvNQtznkjKB/m61BqxPH2d6+Clov
-# oCbSQqTXT6pOR/TRlCv6iV36S3HFMV7mhoWew7dPGUXWKKkvYt6B+eI9tNy9c2mE
-# T4DeQEeYbMEhSe8IuV8WuB5RTjsMwPZZQMqzQ6ipCzWg2xLs/KgN7JjNXhTe+r2M
-# WQRdOCMfkwC20lh4oS5rm2TMDQWyKeDDQr/bKb6WmfAhN9obriKQ3wYBul6yA/Si
-# 7XPo8YOWejt5MutOZFbx1zrD795L7G350kIx4yT6g7oguUehuKoTQIPs4BrNUrTA
-# qxiZfXYG94m+i9AWogi4aGj8Cizt81EbUXOqdDyTyhUl4FQZIq5jSlu7QuARwuZ3
-# u54u778=
+# hvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjYwNzA3MTYzMzM4
+# WjAvBgkqhkiG9w0BCQQxIgQglbzgwjcMupdLDZGvXytaQVQkEbtkLu04IRh0NA6e
+# Q2cwDQYJKoZIhvcNAQEBBQAEggIAba476uDmGEkxdI/jmibbW6Eu+Jh6XcX/Zveb
+# k4dfYeBrRGBpxPI2VzAMs8M8T6B32/RCr3AV05l6sIsbM0cdHDYqgJmgtT+aXs0e
+# vAg7Ii0Vz8TQLyc2658yDs3QYY8eJzyn3D0E0cVoAiGiBoQ7QV28JHlqD/UDFN2L
+# oatwLVhzHl0LpPVAmp8X3ACsVngTTMn/MiYTn0wPtXPJIvVEoJeTuaNIzeKq/gw0
+# 5TH80EMyYbH384EQYPF/8wFu/em/6egnrS/IUcEkk7KE0Vvw0bf0CBHJqTfACBel
+# I3nRi7/sfkoEydGMNdiO7OXtBgX33FI1dNqAZm18WFjzjdMXpmi7Y43QJtXUZaqx
+# 0chRYvHR5JKV5dI5bklSifX20lDM2Usdxr2Ua2G52exWhlSewNKaraAiaXJM7iys
+# w5V9xpDDDnaxR+YljFwpBrpIcm3uTKERHC+uIMLX+0smNSNkMMtjawl2k/1OTjBq
+# oLE1bJJDBNouFT78Nh9petdrcN93zP2snR2E6gK+rrQSEaU1wnrh+MmJXJJZqKJt
+# tllnHna5Srxe9mdnaUGnIxnus+XczCd8s0spQdsNz8wa3M3/fzX3Ytn00dIrMkHR
+# h5yT2Oj5dNi2C83UMegAgwmd8H9jUrb61TEHRcd9GaGmhd/KtYVfM3adxG542M/a
+# AshxQ30=
 # SIG # End signature block
